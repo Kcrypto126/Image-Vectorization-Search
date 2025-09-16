@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pillow
+torch
+torchvision
+ftfy
+regex
+tqdm
+clip-anytorch
+faiss-cpu
+sqlalchemy
+psycopg2-binary
+python-multipart
