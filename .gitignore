@@ -1,0 +1,57 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE/editor
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Type checking
+.mypy_cache/
+.pytype/
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# FAISS index
+faiss.index
+
+# Uploads (keep folder, ignore contents)
+uploads/
+!uploads/.gitkeep
+
+# Local databases
+app.db
+*.sqlite3
+
+# Caches
+.cache/
+__pypackages__/
