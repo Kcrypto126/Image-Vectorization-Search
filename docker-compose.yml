@@ -1,0 +1,69 @@
+version: "3.8"
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: imagedb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  minio:
+    image: minio/minio
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+    ports:
+      - "9000:9000"
+    volumes:
+      - miniodata:/data
+
+  qdrant:
+    image: qdrant/qdrant:v1.3.2
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  image-service:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/imagedb
+      S3_BUCKET: image-bucket
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: minio
+      S3_SECRET_KEY: minio123
+      INDEX_BACKEND: faiss
+      VECTOR_DIM: 512
+      CLIP_MODEL: ViT-B/32
+      DEVICE: cpu
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+      - minio
+
+  worker:
+    build: .
+    command: celery -A app.tasks.celery worker --loglevel=info
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/imagedb
+      CELERY_BROKER: redis://redis:6379/0
+      INDEX_BACKEND: faiss
+    depends_on:
+      - redis
+      - postgres
+volumes:
+  pgdata:
+  miniodata:
+  qdrant_data:
