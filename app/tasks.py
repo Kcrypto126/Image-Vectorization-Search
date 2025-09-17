@@ -1,10 +1,14 @@
 # app/tasks.py
 from celery import Celery
 import os
+from dotenv import load_dotenv
 from .db import DBSession
 from .vectorizer import Vectorizer
 from .index_adapter import IndexAdapter
 import numpy as np
+
+# Load environment variables from .env file
+load_dotenv()
 
 CELERY_BROKER = os.getenv("CELERY_BROKER", "redis://redis:6379/0")
 celery = Celery('tasks', broker=CELERY_BROKER)

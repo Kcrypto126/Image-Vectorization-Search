@@ -11,9 +11,10 @@ faiss-cpu
 sqlalchemy
 psycopg2-binary
 python-multipart
-boto3==1.26.0
-pydantic==2.9.2
-redis==4.6.0
-celery==5.3.0
-prometheus-client==0.16.0
-httpx==0.24.1
+boto3
+pydantic
+redis
+celery
+prometheus-client
+httpx
+dotenv

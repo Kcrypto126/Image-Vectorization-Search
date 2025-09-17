@@ -7,12 +7,22 @@ import faiss
 logger = logging.getLogger(__name__)
 
 class IndexAdapter:
-    def __init__(self, dim=512, faiss_index_path="/data/faiss.index"):
+    def __init__(self, backend: str = "faiss", dim: int = 512, faiss_index_path: str = "/data/faiss.index"):
+        """
+        backend: currently only 'faiss' is supported. Other values are placeholders.
+        dim: embedding dimension
+        faiss_index_path: file path to persist FAISS index
+        """
+        self.backend = backend
         self.faiss = faiss
         self.dim = dim
         self.faiss_index_path = faiss_index_path
         # Default: HNSW for good balance (you can change config)
-        self.index = self.faiss.IndexHNSWFlat(dim, 32)  # M=32
+        if self.backend == "faiss":
+            self.index = self.faiss.IndexHNSWFlat(dim, 32)  # M=32
+        else:
+            # Fallback to FAISS for now
+            self.index = self.faiss.IndexHNSWFlat(dim, 32)
         self.ids = []  # mapping idx -> image_id
 
     def load_if_exists(self):
