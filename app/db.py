@@ -4,6 +4,10 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 import os
 import uuid
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:Roastery818@localhost:5432/imagedb1")
 
@@ -16,7 +20,8 @@ class ImageMetadata(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     content_type = Column(String, nullable=True)
     image_url = Column(String, nullable=False)
-    metadata = Column(JSON, nullable=True)
+    # 'metadata' is reserved by SQLAlchemy's Declarative API; map to column name 'metadata'
+    extra_metadata = Column('metadata', JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 def init_db(database_url: str = None):
@@ -37,3 +42,6 @@ class DBSession:
 
     def get_image_metadata(self, id_):
         return self.session.get(ImageMetadata, id_)
+
+def get_session():
+    return DBSession()

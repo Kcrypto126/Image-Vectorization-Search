@@ -9,6 +9,10 @@ from .vectorizer import Vectorizer
 from .index_adapter import IndexAdapter
 from .db import get_session, init_db
 from .schemas import SearchResultSchema
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -32,7 +36,8 @@ app.add_middleware(
 )
 
 # init DB & index
-init_db(os.getenv("DATABASE_URL"))
+init_db(os.getenv("DATABASE_URL", "postgresql://postgres:Roastery818@localhost:5432/imagedb1"))
+
 vectorizer = Vectorizer(model_name=MODEL_NAME, device=os.getenv("DEVICE", "cpu"))
 index = IndexAdapter(backend=INDEX_BACKEND, dim=DIM)
 
