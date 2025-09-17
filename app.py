@@ -18,13 +18,14 @@ async def root():
 async def add_image(file: UploadFile, content_type: str = Form("unknown")):
     session = SessionLocal()
     try:
-        file_id, path = save_upload_file(file)
+        file_id, path = save_upload_file(file, is_target=False)
 
         # Vectorize
         vector = vectorizer.image_to_vector(path)
 
         # Add to FAISS
         index.add(vector, [file_id])
+        index.save()
 
         # Store metadata in DB
         new_image = ImageMetadata(id=file_id, content_type=content_type, image_url=path)
@@ -36,7 +37,7 @@ async def add_image(file: UploadFile, content_type: str = Form("unknown")):
 
 @app.post("/search")
 async def search_image(file: UploadFile, top_k: int = 10):
-    _, path = save_upload_file(file)
+    _, path = save_upload_file(file, is_target=True)
 
     # Vectorize query
     query_vector = vectorizer.image_to_vector(path)
