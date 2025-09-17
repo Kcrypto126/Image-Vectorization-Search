@@ -9,6 +9,8 @@ from .vectorizer import Vectorizer
 from .index_adapter import IndexAdapter
 from .db import get_session, init_db
 from .schemas import SearchResultSchema
+import tempfile
+import uuid
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -65,13 +67,16 @@ def record_metrics(endpoint: str):
     return decorator
 
 @app.post("/search", response_model=SearchResultSchema)
-@record_metrics("search")
+@record_metrics("/search")
 async def search_image(file: UploadFile = File(...), top_k: int = Query(10, ge=1, le=100)):
     # Validate content type
     if file.content_type not in ("image/jpeg", "image/png", "image/webp"):
         raise HTTPException(status_code=415, detail="Unsupported file type")
-    # save temp file
-    tmp_path = f"/tmp/{file.filename}"
+    # save temp file (cross-platform)
+    tmp_dir = os.getenv("TMP_DIR", tempfile.gettempdir())
+    os.makedirs(tmp_dir, exist_ok=True)
+    tmp_basename = f"{uuid.uuid4().hex}_{file.filename}"
+    tmp_path = os.path.join(tmp_dir, tmp_basename)
     with open(tmp_path, "wb") as f:
         f.write(await file.read())
 
