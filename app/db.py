@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:Roastery818@localhost:5432/imagedb1")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
 
 Base = declarative_base()
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -42,6 +42,10 @@ class DBSession:
 
     def get_image_metadata(self, id_):
         return self.session.get(ImageMetadata, id_)
+
+    def get_all_images(self):
+        """Return a list of all image URLs in the database."""
+        return [img.image_url for img in self.session.query(ImageMetadata.image_url).all()]
 
 def get_session():
     return DBSession()

@@ -1,8 +1,8 @@
 from fastapi import FastAPI, UploadFile, Form
-from vectorizer import Vectorizer
-from index import VectorIndex
-from models import init_db, ImageMetadata
-from utils import save_upload_file
+from .vectorizer import Vectorizer
+from .index import VectorIndex
+from .models import init_db, ImageMetadata
+from .utils import save_upload_file
 
 # Initialize components
 app = FastAPI()
