@@ -1,15 +1,17 @@
 # app/main.py
 import os
 import logging
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from starlette.responses import Response
 from .vectorizer import Vectorizer
 from .index_adapter import IndexAdapter
 from .db import get_session, init_db, ImageMetadata
 from .schemas import SearchResultSchema
-from .utils.storage import upload_file
+from .storage import save_image
+from .tasks import full_reindex
 import tempfile
 import uuid
 from dotenv import load_dotenv
@@ -38,8 +40,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount the 'data/images' directory on the '/data/images' URL path
+app.mount("/data/images", StaticFiles(directory="data/images"), name="images")
+
 # init DB & index
-init_db(os.getenv("DATABASE_URL", "postgresql://postgres:Roastery818@localhost:5432/imagedb1"))
+init_db(os.getenv("DATABASE_URL"))
 
 vectorizer = Vectorizer(model_name=MODEL_NAME, device=os.getenv("DEVICE", "cpu"))
 index = IndexAdapter(backend=INDEX_BACKEND, dim=DIM)
@@ -48,56 +53,20 @@ index = IndexAdapter(backend=INDEX_BACKEND, dim=DIM)
 async def on_startup():
     logger.info("Starting service")
     loaded = index.load_if_exists()
+    print(loaded)
     # If index doesn't exist, build from DB and persist
-    if not loaded:
-        logger.info("No existing index found. Running full reindex...")
-        session = get_session()
-        # fetch all images
-        images = session.session.query(ImageMetadata).all()
-        import numpy as np
-        batch_size = int(os.getenv("REINDEX_BATCH", "128"))
-        total = 0
-        for i in range(0, len(images), batch_size):
-            batch = images[i:i+batch_size]
-            ids = []
-            vecs = []
-            for img in batch:
-                try:
-                    v = vectorizer.image_to_vector(img.image_url)
-                except Exception:
-                    continue
-                vecs.append(v[0])
-                ids.append(img.id)
-            if vecs:
-                vecs = np.vstack(vecs).astype("float32")
-                index.add(vecs, ids)
-                total += len(ids)
-        index.save()
-        logger.info(f"Full reindex complete, vectors added: {total}")
+    # if not loaded:
+    #     logger.info("No existing index found. Running full reindex...")
+    #     return index.run_full_reindex()
 
-@app.get("/metrics")
-async def metrics():
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
-
-def record_metrics(endpoint: str):
-    def decorator(func):
-        async def wrapper(*args, **kwargs):
-            with REQUEST_LATENCY.labels(endpoint).time():
-                try:
-                    res = await func(*args, **kwargs)
-                    REQUEST_COUNT.labels(endpoint, "POST", "200").inc()
-                    return res
-                except HTTPException as e:
-                    REQUEST_COUNT.labels(endpoint, "POST", str(e.status_code)).inc()
-                    raise
-        return wrapper
-    return decorator
+@app.get("/")
+async def root():
+    return {"message": "Image Search Backend running"}
 
 @app.post("/search", response_model=SearchResultSchema)
-@record_metrics("/search")
 async def search_image(file: UploadFile = File(...), top_k: int = Query(10, ge=1, le=100)):
     # Validate content type
-    if file.content_type not in ("image/jpeg", "image/png", "image/webp"):
+    if file.content_type not in ("image/jpeg", "image/jpg", "image/png", "image/webp"):
         raise HTTPException(status_code=415, detail="Unsupported file type")
     # save temp file (cross-platform)
     tmp_dir = os.getenv("TMP_DIR", tempfile.gettempdir())
@@ -131,53 +100,45 @@ async def search_image(file: UploadFile = File(...), top_k: int = Query(10, ge=1
     return {"results": enriched}
 
 @app.post("/admin/index")
-async def admin_full_reindex():
-    # Rebuild index from scratch from DB
-    session = get_session()
-    images = session.session.query(ImageMetadata).all()
-    import numpy as np
-    index.reset()
-    batch_size = int(os.getenv("REINDEX_BATCH", "128"))
-    total = 0
-    for i in range(0, len(images), batch_size):
-        batch = images[i:i+batch_size]
-        ids = []
-        vecs = []
-        for img in batch:
-            try:
-                v = vectorizer.image_to_vector(img.image_url)
-            except Exception:
-                continue
-            vecs.append(v[0])
-            ids.append(img.id)
-        if vecs:
-            vecs = np.vstack(vecs).astype("float32")
-            index.add(vecs, ids)
-            total += len(ids)
-    index.save()
-    return {"status": "ok", "indexed": total}
+async def reindex(background_tasks: BackgroundTasks):
+    background_tasks.add_task(full_reindex)
+    return {"status": "reindex started"}
 
 @app.post("/uploads")
 async def upload_image(file: UploadFile = File(...)):
-    if file.content_type not in ("image/jpeg", "image/png", "image/webp"):
+    logger.info("uploading...")
+    if file.content_type not in ("image/jpeg", "image/jpg", "image/png", "image/webp"):
         raise HTTPException(status_code=415, detail="Unsupported file type")
     tmp_dir = os.getenv("TMP_DIR", tempfile.gettempdir())
     os.makedirs(tmp_dir, exist_ok=True)
     image_id = str(uuid.uuid4())
     tmp_path = os.path.join(tmp_dir, f"{image_id}_{file.filename}")
-    with open(tmp_path, "wb") as f:
-        f.write(await file.read())
-    # store file (local or s3)
-    key = f"{image_id}.jpg"
-    stored_url = upload_file(tmp_path, key)
-    # record in DB
-    session = get_session()
-    session.add_image(id_=image_id, content_type=file.content_type, image_url=stored_url, metadata=None)
-    # vectorize and add to index incrementally
     try:
-        vec = vectorizer.image_to_vector(tmp_path)
-        index.add(vec.astype("float32"), [image_id])
-        index.save()
-    except Exception:
-        logger.exception("Vectorization failed during upload; record saved without index update")
-    return {"id": image_id, "image_url": stored_url}
+        # Write uploaded file to temp path
+        with open(tmp_path, "wb") as f:
+            f.write(await file.read())
+        # Try to store file (local or s3) using app.storage
+        try:
+            with open(tmp_path, "rb") as rf:
+                stored_url = save_image(image_id, file.filename, rf.read())
+        except Exception as storage_exc:
+            logger.exception("Failed to store image in storage backend")
+            raise HTTPException(status_code=500, detail=f"Failed to store image: {storage_exc}")
+        # Record in DB
+        session = get_session()
+        session.add_image(id_=image_id, content_type=file.content_type, image_url=stored_url, metadata=None)
+        # Vectorize and add to index incrementally
+        try:
+            vec = vectorizer.image_to_vector(tmp_path)
+            index.add(vec.astype("float32"), [image_id])
+            index.save()
+        except Exception:
+            logger.exception("Vectorization failed during upload; record saved without index update")
+        return {"id": image_id, "image_url": stored_url}
+    finally:
+        # Clean up temp file
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            logger.warning(f"Failed to remove temp file: {tmp_path}")

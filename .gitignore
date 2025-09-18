@@ -55,3 +55,7 @@ app.db
 # Caches
 .cache/
 __pypackages__/
+
+
+# Data
+data/

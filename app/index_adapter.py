@@ -17,12 +17,8 @@ class IndexAdapter:
         self.faiss = faiss
         self.dim = dim
         self.faiss_index_path = faiss_index_path
-        # Default: HNSW for good balance (you can change config)
-        if self.backend == "faiss":
-            self.index = self.faiss.IndexHNSWFlat(dim, 32)  # M=32
-        else:
-            # Fallback to FAISS for now
-            self.index = self.faiss.IndexHNSWFlat(dim, 32)
+        # Inner product = cosine similarity if vectors are normalized
+        self.index = faiss.IndexFlatIP(dim)
         self.ids = []  # mapping idx -> image_id
 
     def exists(self) -> bool:
@@ -53,25 +49,25 @@ class IndexAdapter:
             f.writelines([f"{i}\n" for i in self.ids])
 
     def reset(self):
-        if self.backend == "faiss":
-            self.index = self.faiss.IndexHNSWFlat(self.dim, 32)
-        else:
-            self.index = self.faiss.IndexHNSWFlat(self.dim, 32)
+        # Inner product = cosine similarity if vectors are normalized
+        self.index = faiss.IndexFlatIP(self.dim)
         self.ids = []
-
+    
     def add(self, vectors: np.ndarray, ids: list):
-        vectors = vectors.astype("float32")
+        faiss.normalize_L2(vectors)  # Normalize for cosine similarity
         self.index.add(vectors)
         self.ids.extend(ids)
 
     def search(self, qvec: np.ndarray, top_k=10):
-        qvec = qvec.astype("float32")
-        if hasattr(self.index, 'ntotal') and getattr(self.index, 'ntotal') == 0:
-            return []
+        faiss.normalize_L2(qvec)
         distances, indices = self.index.search(qvec, top_k)
         results = []
-        for i, idx in enumerate(indices[0]):
+        for rank, idx in enumerate(indices[0]):
             if idx < 0 or idx >= len(self.ids):
                 continue
-            results.append({"id": self.ids[idx], "score": float(distances[0][i])})
+            results.append({
+                "id": self.ids[idx],
+                "score": float(distances[0][rank])
+            })
         return results
+
