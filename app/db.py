@@ -43,9 +43,5 @@ class DBSession:
     def get_image_metadata(self, id_):
         return self.session.get(ImageMetadata, id_)
 
-    def get_all_images(self):
-        """Return a list of all image URLs in the database."""
-        return [img.image_url for img in self.session.query(ImageMetadata.image_url).all()]
-
 def get_session():
     return DBSession()

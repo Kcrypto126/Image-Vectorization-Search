@@ -7,7 +7,7 @@ import faiss
 logger = logging.getLogger(__name__)
 
 class IndexAdapter:
-    def __init__(self, backend: str = "faiss", dim: int = 512, faiss_index_path: str = "/data/faiss.index"):
+    def __init__(self, backend: str = "faiss", dim: int = 512, faiss_index_path: str = "data/faiss.index"):
         """
         backend: currently only 'faiss' is supported. Other values are placeholders.
         dim: embedding dimension
