@@ -7,8 +7,9 @@ from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_
 from starlette.responses import Response
 from .vectorizer import Vectorizer
 from .index_adapter import IndexAdapter
-from .db import get_session, init_db
+from .db import get_session, init_db, ImageMetadata
 from .schemas import SearchResultSchema
+from .utils.storage import upload_file
 import tempfile
 import uuid
 from dotenv import load_dotenv
@@ -46,7 +47,33 @@ index = IndexAdapter(backend=INDEX_BACKEND, dim=DIM)
 @app.on_event("startup")
 async def on_startup():
     logger.info("Starting service")
-    index.load_if_exists()
+    loaded = index.load_if_exists()
+    # If index doesn't exist, build from DB and persist
+    if not loaded:
+        logger.info("No existing index found. Running full reindex...")
+        session = get_session()
+        # fetch all images
+        images = session.session.query(ImageMetadata).all()
+        import numpy as np
+        batch_size = int(os.getenv("REINDEX_BATCH", "128"))
+        total = 0
+        for i in range(0, len(images), batch_size):
+            batch = images[i:i+batch_size]
+            ids = []
+            vecs = []
+            for img in batch:
+                try:
+                    v = vectorizer.image_to_vector(img.image_url)
+                except Exception:
+                    continue
+                vecs.append(v[0])
+                ids.append(img.id)
+            if vecs:
+                vecs = np.vstack(vecs).astype("float32")
+                index.add(vecs, ids)
+                total += len(ids)
+        index.save()
+        logger.info(f"Full reindex complete, vectors added: {total}")
 
 @app.get("/metrics")
 async def metrics():
@@ -102,3 +129,55 @@ async def search_image(file: UploadFile = File(...), top_k: int = Query(10, ge=1
             "score": r["score"]
         })
     return {"results": enriched}
+
+@app.post("/admin/index")
+async def admin_full_reindex():
+    # Rebuild index from scratch from DB
+    session = get_session()
+    images = session.session.query(ImageMetadata).all()
+    import numpy as np
+    index.reset()
+    batch_size = int(os.getenv("REINDEX_BATCH", "128"))
+    total = 0
+    for i in range(0, len(images), batch_size):
+        batch = images[i:i+batch_size]
+        ids = []
+        vecs = []
+        for img in batch:
+            try:
+                v = vectorizer.image_to_vector(img.image_url)
+            except Exception:
+                continue
+            vecs.append(v[0])
+            ids.append(img.id)
+        if vecs:
+            vecs = np.vstack(vecs).astype("float32")
+            index.add(vecs, ids)
+            total += len(ids)
+    index.save()
+    return {"status": "ok", "indexed": total}
+
+@app.post("/uploads")
+async def upload_image(file: UploadFile = File(...)):
+    if file.content_type not in ("image/jpeg", "image/png", "image/webp"):
+        raise HTTPException(status_code=415, detail="Unsupported file type")
+    tmp_dir = os.getenv("TMP_DIR", tempfile.gettempdir())
+    os.makedirs(tmp_dir, exist_ok=True)
+    image_id = str(uuid.uuid4())
+    tmp_path = os.path.join(tmp_dir, f"{image_id}_{file.filename}")
+    with open(tmp_path, "wb") as f:
+        f.write(await file.read())
+    # store file (local or s3)
+    key = f"{image_id}.jpg"
+    stored_url = upload_file(tmp_path, key)
+    # record in DB
+    session = get_session()
+    session.add_image(id_=image_id, content_type=file.content_type, image_url=stored_url, metadata=None)
+    # vectorize and add to index incrementally
+    try:
+        vec = vectorizer.image_to_vector(tmp_path)
+        index.add(vec.astype("float32"), [image_id])
+        index.save()
+    except Exception:
+        logger.exception("Vectorization failed during upload; record saved without index update")
+    return {"id": image_id, "image_url": stored_url}

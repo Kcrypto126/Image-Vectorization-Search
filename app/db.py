@@ -36,7 +36,7 @@ class DBSession:
         self.session = SessionLocal()
 
     def add_image(self, id_, content_type, image_url, metadata=None):
-        img = ImageMetadata(id=id_, content_type=content_type, image_url=image_url, metadata=metadata)
+        img = ImageMetadata(id=id_, content_type=content_type, image_url=image_url, extra_metadata=metadata)
         self.session.add(img)
         self.session.commit()
 
