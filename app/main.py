@@ -11,7 +11,7 @@ from .index_adapter import IndexAdapter
 from .db import get_session, init_db, ImageMetadata
 from .schemas import SearchResultSchema
 from .storage import save_image
-from .tasks import full_reindex, ingest_local_images
+from .tasks import full_reindex, ingest_local_images, ingest_online_images
 import tempfile
 import uuid
 from dotenv import load_dotenv
@@ -116,6 +116,15 @@ async def ingest_local(background_tasks: BackgroundTasks):
     """
     background_tasks.add_task(ingest_local_images)
     logger.info("Ingest started...loading...")
+    return {"status": "ingest started"}
+
+@app.post("/admin/ingest-online")
+async def ingest_from_online(background_tasks: BackgroundTasks):
+    """
+    Parse app/data.json and ingest images using link + media[0].url
+    """
+    background_tasks.add_task(ingest_online_images)
+    logger.info("Ingest from data.json started...loading...")
     return {"status": "ingest started"}
 
 @app.post("/uploads")

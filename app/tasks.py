@@ -1,14 +1,15 @@
 import os
 import tempfile
 import requests
-from urllib.parse import urlparse
+import json
+from urllib.parse import urlparse, urljoin
 from celery import Celery
 from dotenv import load_dotenv
 import numpy as np
 import uuid
 import logging
 
-from .db import get_session, ImageMetadata
+from .db import get_session, ImageMetadata, init_db
 from .vectorizer import Vectorizer
 from .index_adapter import IndexAdapter
 
@@ -61,6 +62,8 @@ def _get_local_path_from_url(image_url):
 
 @celery.task(bind=True)
 def full_reindex(self):
+    # Ensure DB is initialized when running under Celery worker
+    init_db(os.getenv("DATABASE_URL"))
     session = get_session()
     try:
         index = IndexAdapter(
@@ -71,15 +74,37 @@ def full_reindex(self):
             model_name=os.getenv("CLIP_MODEL", "ViT-B/32"),
             device=os.getenv("DEVICE", "cpu")
         )
-        # fetch all images
+        
+        # Load existing index if it exists
+        existing_indexed_ids = set()
+        if index.exists():
+            logger.info("Loading existing index...")
+            index.load_if_exists()
+            existing_indexed_ids = set(index.ids)
+            logger.info(f"Found {len(existing_indexed_ids)} already indexed images")
+        
+        # fetch all images from DB
         images = session.session.query(ImageMetadata).all()
         if not images:
             logger.info("No images found from DB")
             return {"status": "done", "count": 0}
 
+        # Filter out already indexed images
+        new_images = [img for img in images if img.id not in existing_indexed_ids]
+        skipped_count = len(images) - len(new_images)
+        
+        if skipped_count > 0:
+            logger.info(f"Skipping {skipped_count} already indexed images")
+        
+        if not new_images:
+            logger.info("All images are already indexed")
+            return {"status": "done", "count": len(images), "skipped": skipped_count, "new": 0}
+
+        logger.info(f"Processing {len(new_images)} new images for indexing")
+
         chunk_size = 128
-        for i in range(0, len(images), chunk_size):
-            batch = images[i:i+chunk_size]
+        for i in range(0, len(new_images), chunk_size):
+            batch = new_images[i:i+chunk_size]
             ids = []
             vecs = []
             for img in batch:
@@ -105,11 +130,10 @@ def full_reindex(self):
                 index.add(vecs_np, ids)
         index.save()
         logger.info("Successfully reindexed!!!")
-        return {"status": "done", "count": len(images)}
+        return {"status": "done", "count": len(images), "skipped": skipped_count, "new": len(new_images)}
     except Exception as e:
         print(f"Error in full_reindex: {e}")
         return {"status": "error", "error": str(e)}
-
 
 @celery.task(bind=True)
 def ingest_local_images(self):
@@ -124,6 +148,8 @@ def ingest_local_images(self):
     processed = 0
     skipped = 0
     errors = 0
+    # Ensure DB is initialized when running under Celery worker
+    init_db(os.getenv("DATABASE_URL"))
     session = get_session()
     # Prepare vectorizer and index
     index = IndexAdapter(
@@ -205,6 +231,156 @@ def ingest_local_images(self):
             # If saving index fails, report but keep DB inserts
             pass
         logger.info("Successfully ingested and indexed!!!")
+        return {"status": "done", "processed": processed, "skipped": skipped, "errors": errors}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "processed": processed, "skipped": skipped, "errors": errors}
+
+@celery.task(bind=True)
+def ingest_online_images(self):
+    """
+    Read app/data.json and ingest images whose URLs are constructed from
+    item.link + item.media[0].url (using urljoin for correctness).
+    Stores metadata in DB and vectors in index, skipping already ingested URLs.
+    Also downloads and saves the image to data/images directory.
+    """
+    processed = 0
+    skipped = 0
+    errors = 0
+
+    # Resolve path to data.json located in the same directory as this module
+    data_json_path = os.path.join(os.path.dirname(__file__), "data.json")
+
+    # Ensure DB is initialized when running under Celery worker
+    init_db(os.getenv("DATABASE_URL"))
+    session = get_session()
+
+    # Prepare vectorizer and index
+    index = IndexAdapter(
+        backend=os.getenv("INDEX_BACKEND", "faiss"),
+        dim=int(os.getenv("VECTOR_DIM", "512"))
+    )
+    vectorizer = Vectorizer(
+        model_name=os.getenv("CLIP_MODEL", "ViT-B/32"),
+        device=os.getenv("DEVICE", "cpu")
+    )
+
+    batch_size = 128
+    pending_vecs = []
+    pending_ids = []
+
+    # No persistent download/save; we'll vectorize from a temp file when needed
+
+    try:
+        if not os.path.exists(data_json_path):
+            logger.info("data.json not found at %s", data_json_path)
+            return {"status": "done", "processed": 0, "skipped": 0, "errors": 0}
+
+        with open(data_json_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+
+        items = payload.get("data", []) if isinstance(payload, dict) else []
+        if not items:
+            logger.info("No items found in data.json")
+            return {"status": "done", "processed": 0, "skipped": 0, "errors": 0}
+        
+        for item in items:
+            try:
+                media = item.get("media") or []
+                if not media or not isinstance(media, list) or not media[0] or not media[0].get("url"):
+                    skipped += 1
+                    continue
+
+                media_entry = media[0]
+                media_url = media_entry.get("url")
+                base_link = "https://api.uitips.me"
+                if not base_link:
+                    skipped += 1
+                    continue
+                if media_url.startswith("/"):
+                    image_url = base_link.rstrip("/") + media_url
+                else:
+                    image_url = base_link.rstrip("/") + "/" + media_url
+                print(image_url)
+
+                # Skip if already ingested (match by URL)
+                try:
+                    existing = session.session.query(ImageMetadata).filter(ImageMetadata.image_url == image_url).first()
+                    if existing:
+                        skipped += 1
+                        logger.info(f"Skip existing image_url in DB: {image_url}")
+                        continue
+                except Exception as db_check_exc:
+                    logger.warning(f"DB check failed for {image_url}: {db_check_exc}")
+
+                # Determine content type
+                content_type = media_entry.get("mime") or _guess_content_type_from_ext(media_url)
+
+                # Vectorize from a local temp file if remote; do not persist the image
+                temp_path = None
+                try:
+                    temp_path = _get_local_path_from_url(image_url)
+                    v = vectorizer.image_to_vector(temp_path)
+                    if v is None or len(v) == 0:
+                        logger.warning(f"Vectorization produced empty vector for {image_url}")
+                        errors += 1
+                        continue
+                except Exception as e:
+                    logger.warning(f"Error fetching/vectorizing {image_url}: {e}")
+                    errors += 1
+                    continue
+                finally:
+                    if temp_path and temp_path != image_url and os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except Exception:
+                            pass
+
+                # Save DB row first
+                img_id = str(uuid.uuid4())
+                try:
+                    session.add_image(id_=img_id, content_type=content_type, image_url=image_url, metadata=None)
+                except Exception as db_write_exc:
+                    logger.warning(f"Failed to insert image metadata for {image_url}: {db_write_exc}")
+                    errors += 1
+                    continue
+
+                # Queue for index add
+                pending_vecs.append(v[0])
+                pending_ids.append(img_id)
+                processed += 1
+
+                # Flush batch
+                if len(pending_vecs) >= batch_size:
+                    try:
+                        vecs_np = np.vstack(pending_vecs).astype("float32")
+                        index.add(vecs_np, pending_ids)
+                    except Exception:
+                        errors += len(pending_vecs)
+                    finally:
+                        pending_vecs = []
+                        pending_ids = []
+            except Exception:
+                errors += 1
+                continue
+
+        # Flush remaining vectors
+        if pending_vecs:
+            try:
+                vecs_np = np.vstack(pending_vecs).astype("float32")
+                index.add(vecs_np, pending_ids)
+            except Exception:
+                errors += len(pending_vecs)
+            finally:
+                pending_vecs = []
+                pending_ids = []
+
+        # Persist index
+        try:
+            index.save()
+        except Exception:
+            pass
+
+        logger.info("Successfully ingested from data.json and indexed!!!")
         return {"status": "done", "processed": processed, "skipped": skipped, "errors": errors}
     except Exception as e:
         return {"status": "error", "error": str(e), "processed": processed, "skipped": skipped, "errors": errors}
