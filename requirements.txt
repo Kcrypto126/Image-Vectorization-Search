@@ -18,3 +18,4 @@ celery
 prometheus-client
 httpx
 dotenv
+requests

@@ -68,6 +68,12 @@ async def search_image(file: UploadFile = File(...), top_k: int = Query(10, ge=1
     # Validate content type
     if file.content_type not in ("image/jpeg", "image/jpg", "image/png", "image/webp"):
         raise HTTPException(status_code=415, detail="Unsupported file type")
+    
+    # validate if faiss.index exists
+    loaded = index.load_if_exists()
+    if not loaded:
+        raise HTTPException(status_code=404, detail="Index not found")
+    
     # save temp file (cross-platform)
     tmp_dir = os.getenv("TMP_DIR", tempfile.gettempdir())
     os.makedirs(tmp_dir, exist_ok=True)
