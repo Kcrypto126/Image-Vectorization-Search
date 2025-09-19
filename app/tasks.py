@@ -238,17 +238,19 @@ def ingest_local_images(self):
 @celery.task(bind=True)
 def ingest_online_images(self):
     """
-    Read app/data.json and ingest images whose URLs are constructed from
-    item.link + item.media[0].url (using urljoin for correctness).
-    Stores metadata in DB and vectors in index, skipping already ingested URLs.
-    Also downloads and saves the image to data/images directory.
+    Fetch feed items from remote API and ingest images whose URLs are
+    built from base host + media[0].url. Store metadata in DB and vectors
+    in index, skipping already ingested URLs. Images are not persisted locally.
     """
     processed = 0
     skipped = 0
     errors = 0
 
-    # Resolve path to data.json located in the same directory as this module
-    data_json_path = os.path.join(os.path.dirname(__file__), "data.json")
+    # Remote API endpoint for feed data (can override via FEED_API_URL)
+    api_url = os.getenv(
+        "FEED_API_URL",
+        "https://api.uitips.me/api/v1/posts/feed?page=1&orderBy=image&order=asc&_limit=20",
+    )
 
     # Ensure DB is initialized when running under Celery worker
     init_db(os.getenv("DATABASE_URL"))
@@ -263,7 +265,7 @@ def ingest_online_images(self):
         model_name=os.getenv("CLIP_MODEL", "ViT-B/32"),
         device=os.getenv("DEVICE", "cpu")
     )
-
+    
     batch_size = 128
     pending_vecs = []
     pending_ids = []
@@ -271,18 +273,16 @@ def ingest_online_images(self):
     # No persistent download/save; we'll vectorize from a temp file when needed
 
     try:
-        if not os.path.exists(data_json_path):
-            logger.info("data.json not found at %s", data_json_path)
-            return {"status": "done", "processed": 0, "skipped": 0, "errors": 0}
-
-        with open(data_json_path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
+        # Fetch feed from remote API
+        resp = requests.get(api_url, timeout=20)
+        resp.raise_for_status()
+        payload = resp.json()
 
         items = payload.get("data", []) if isinstance(payload, dict) else []
         if not items:
-            logger.info("No items found in data.json")
+            logger.info("No items found from remote API feed")
             return {"status": "done", "processed": 0, "skipped": 0, "errors": 0}
-        
+
         for item in items:
             try:
                 media = item.get("media") or []
@@ -380,7 +380,7 @@ def ingest_online_images(self):
         except Exception:
             pass
 
-        logger.info("Successfully ingested from data.json and indexed!!!")
+        logger.info("Successfully ingested from remote API feed and indexed!!!")
         return {"status": "done", "processed": processed, "skipped": skipped, "errors": errors}
     except Exception as e:
         return {"status": "error", "error": str(e), "processed": processed, "skipped": skipped, "errors": errors}

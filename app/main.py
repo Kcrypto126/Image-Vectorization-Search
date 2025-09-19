@@ -124,7 +124,7 @@ async def ingest_from_online(background_tasks: BackgroundTasks):
     Parse app/data.json and ingest images using link + media[0].url
     """
     background_tasks.add_task(ingest_online_images)
-    logger.info("Ingest from data.json started...loading...")
+    logger.info("Ingest from api started...loading...")
     return {"status": "ingest started"}
 
 @app.post("/uploads")
