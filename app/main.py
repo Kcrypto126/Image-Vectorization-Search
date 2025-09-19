@@ -11,7 +11,7 @@ from .index_adapter import IndexAdapter
 from .db import get_session, init_db, ImageMetadata
 from .schemas import SearchResultSchema
 from .storage import save_image
-from .tasks import full_reindex
+from .tasks import full_reindex, ingest_local_images, ingest_online_images
 import tempfile
 import uuid
 from dotenv import load_dotenv
@@ -53,11 +53,9 @@ index = IndexAdapter(backend=INDEX_BACKEND, dim=DIM)
 async def on_startup():
     logger.info("Starting service")
     loaded = index.load_if_exists()
-    print(loaded)
     # If index doesn't exist, build from DB and persist
-    # if not loaded:
-    #     logger.info("No existing index found. Running full reindex...")
-    #     return index.run_full_reindex()
+    if not loaded:
+        logger.info("No existing index found. Running full reindex...?")
 
 @app.get("/")
 async def root():
@@ -108,17 +106,39 @@ async def search_image(file: UploadFile = File(...), top_k: int = Query(10, ge=1
 @app.post("/admin/index")
 async def reindex(background_tasks: BackgroundTasks):
     background_tasks.add_task(full_reindex)
+    logger.info("Reindex started...loading...")
     return {"status": "reindex started"}
+
+@app.post("/admin/ingest-local")
+async def ingest_local(background_tasks: BackgroundTasks):
+    """
+    Scan data/images directory and store metadata for all images into DB
+    """
+    background_tasks.add_task(ingest_local_images)
+    logger.info("Ingest started...loading...")
+    return {"status": "ingest started"}
+
+@app.post("/admin/ingest-online")
+async def ingest_from_online(background_tasks: BackgroundTasks):
+    """
+    Parse app/data.json and ingest images using link + media[0].url
+    """
+    background_tasks.add_task(ingest_online_images)
+    logger.info("Ingest from data.json started...loading...")
+    return {"status": "ingest started"}
 
 @app.post("/uploads")
 async def upload_image(file: UploadFile = File(...)):
     logger.info("uploading...")
+
     if file.content_type not in ("image/jpeg", "image/jpg", "image/png", "image/webp"):
         raise HTTPException(status_code=415, detail="Unsupported file type")
+    
     tmp_dir = os.getenv("TMP_DIR", tempfile.gettempdir())
     os.makedirs(tmp_dir, exist_ok=True)
     image_id = str(uuid.uuid4())
     tmp_path = os.path.join(tmp_dir, f"{image_id}_{file.filename}")
+
     try:
         # Write uploaded file to temp path
         with open(tmp_path, "wb") as f:
@@ -126,7 +146,7 @@ async def upload_image(file: UploadFile = File(...)):
         # Try to store file (local or s3) using app.storage
         try:
             with open(tmp_path, "rb") as rf:
-                stored_url = save_image(image_id, file.filename, rf.read())
+                stored_url = save_image(file.filename, rf.read())
         except Exception as storage_exc:
             logger.exception("Failed to store image in storage backend")
             raise HTTPException(status_code=500, detail=f"Failed to store image: {storage_exc}")

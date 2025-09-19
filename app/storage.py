@@ -11,7 +11,7 @@ S3_ENDPOINT = os.getenv("S3_ENDPOINT_URL")
 S3_KEY = os.getenv("S3_ACCESS_KEY")
 S3_SECRET = os.getenv("S3_SECRET_KEY")
 
-def save_image(image_id: str, filename: str, content: bytes) -> str:
+def save_image(filename: str, content: bytes) -> str:
     if STORAGE_BACKEND == "s3":
         s3 = boto3.client(
             "s3",
@@ -19,12 +19,12 @@ def save_image(image_id: str, filename: str, content: bytes) -> str:
             aws_access_key_id=S3_KEY,
             aws_secret_access_key=S3_SECRET,
         )
-        key = f"{image_id}_{filename}"
+        key = f"{filename}"
         s3.put_object(Bucket=S3_BUCKET, Key=key, Body=content)
         return f"{S3_ENDPOINT}/{S3_BUCKET}/{key}"
     else:
         os.makedirs("data/images", exist_ok=True)
-        path = f"data/images/{image_id}_{filename}"
+        path = f"data/images/{filename}"
         with open(path, "wb") as f:
             f.write(content)
-        return f"http://127.0.0.1:8000/data/images/{image_id}_{filename}"
+        return f"http://127.0.0.1:8000/data/images/{filename}"
