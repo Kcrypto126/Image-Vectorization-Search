@@ -19,3 +19,5 @@ prometheus-client
 httpx
 dotenv
 requests
+colorthief
+ultralytics

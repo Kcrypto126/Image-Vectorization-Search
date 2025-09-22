@@ -12,6 +12,8 @@ from .db import get_session, init_db, ImageMetadata
 from .schemas import SearchResultSchema
 from .storage import save_image
 from .tasks import full_reindex, ingest_local_images, ingest_online_images
+from .db import ImageMetadata
+from .metadata import extract_image_metadata, detect_filters_from_text
 import tempfile
 import uuid
 from dotenv import load_dotenv
@@ -105,10 +107,9 @@ async def search_image(file: UploadFile = File(...), top_k: int = Query(10, ge=1
 
 @app.post("/search", response_model=SearchResultSchema)
 async def unified_search(
-    file: UploadFile = File(None),
+    file: UploadFile = File(None, description="Target image"),
     query_text: str = Query(None, description="Text query to search for similar images"),
-    top_k: int = Query(10, ge=1, le=100),
-    text_weight: float = Query(0.5, ge=0.0, le=1.0, description="Weight for text vector when combining with image (0.0 = image only, 1.0 = text only)")
+    top_k: int = Query(10, ge=1, le=100)
 ):
     """
     Unified search endpoint that accepts text, image, or both inputs.
@@ -170,28 +171,72 @@ async def unified_search(
             except Exception:
                 logger.warning(f"Failed to remove temp file: {tmp_path}")
     
+    # Determine text_weight automatically
+    if text_vector is not None and image_vector is not None:
+        weight = 0.5
+    elif text_vector is not None and image_vector is None:
+        weight = 1.0
+    elif text_vector is None and image_vector is not None:
+        weight = 0.0
+
     # Combine vectors if both are available
     try:
-        qvec = vectorizer.combine_vectors(text_vector, image_vector, text_weight)
+        qvec = vectorizer.combine_vectors(text_vector, image_vector, weight)
     except Exception as e:
         logger.exception("Vector combination failed")
         raise HTTPException(status_code=500, detail="Vector combination error")
 
-    # search
-    results = index.search(qvec, top_k=top_k)
+    # search initial candidates from FAISS (retrieve more for filtering headroom)
+    initial_k = max(top_k, 50)
+    results = index.search(qvec, top_k=initial_k)
 
-    # enrich metadata from DB
+    # Infer filters from query_text
+    wanted_colors, wanted_objects, wanted_styles = detect_filters_from_text(query_text or "")
+    print("wanted_colors:", wanted_colors)
+    print("wanted_objects:", wanted_objects)
+    print("wanted_styles:", wanted_styles)
+
+    # enrich metadata from DB and filter/re-rank
     session = get_session()
-    enriched = []
+    filtered = []
     for r in results:
-        meta = session.get_image_metadata(r["id"])
-        enriched.append({
+        meta = session.get_image_metadata(r["id"])  # type: ImageMetadata
+        if not meta:
+            continue
+        extra = meta.extra_metadata or {}
+        colors = set([c.lower() for c in (extra.get("colors") or [])])
+        objects = set([o.lower() for o in (extra.get("objects") or [])])
+        style_tags = set([t.lower() for t in (extra.get("style_tags") or [])])
+
+        # Apply inclusive filters if provided
+        # if wanted_colors and not (wanted_colors & colors):
+        #     continue
+        # if wanted_objects and not (wanted_objects & objects):
+        #     continue
+        # if wanted_styles and not (wanted_styles & style_tags):
+        #     continue
+
+        # Re-ranking: always apply bonus for metadata matches
+        score = float(r["score"]) if r.get("score") is not None else 0.0
+        bonus = 0.0
+        # if wanted_colors:
+        #     bonus += 0.02 * len(wanted_colors & colors)
+        # if wanted_objects:
+        #     bonus += 0.03 * len(wanted_objects & objects)
+        # if wanted_styles:
+        #     bonus += 0.04 * len(wanted_styles & style_tags)
+        # score += bonus
+
+        filtered.append({
             "id": r["id"],
-            "content_type": meta.content_type if meta else None,
-            "image_url": meta.image_url if meta else None,
-            "score": r["score"]
+            "content_type": meta.content_type,
+            "image_url": meta.image_url,
+            "score": score
         })
-    return {"results": enriched}
+
+    # Sort by updated score desc and trim to top_k
+    filtered.sort(key=lambda x: x["score"], reverse=True)
+    return {"results": filtered[:top_k]}
 
 @app.post("/search-by-text", response_model=SearchResultSchema)
 async def search_by_text(query: str = Query(..., description="Text query to search for similar images"), top_k: int = Query(10, ge=1, le=100)):
@@ -280,14 +325,26 @@ async def upload_image(file: UploadFile = File(...)):
             raise HTTPException(status_code=500, detail=f"Failed to store image: {storage_exc}")
         # Record in DB
         session = get_session()
-        session.add_image(id_=image_id, content_type=file.content_type, image_url=stored_url, metadata=None)
-        # Vectorize and add to index incrementally
+        # Vectorize first to also compute metadata
+        vec = None
         try:
             vec = vectorizer.image_to_vector(tmp_path)
-            index.add(vec.astype("float32"), [image_id])
-            index.save()
         except Exception:
             logger.exception("Vectorization failed during upload; record saved without index update")
+        extra_meta = None
+        try:
+            if vec is not None and len(vec) > 0:
+                extra_meta = extract_image_metadata(tmp_path, vectorizer, vec[0])
+        except Exception:
+            pass
+        session.add_image(id_=image_id, content_type=file.content_type, image_url=stored_url, metadata=extra_meta)
+        # Vectorize and add to index incrementally
+        try:
+            if vec is not None and len(vec) > 0:
+                index.add(vec.astype("float32"), [image_id])
+                index.save()
+        except Exception:
+            logger.exception("Index update failed during upload")
         return {"id": image_id, "image_url": stored_url}
     finally:
         # Clean up temp file
