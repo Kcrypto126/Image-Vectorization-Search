@@ -61,7 +61,7 @@ async def on_startup():
 async def root():
     return {"message": "Image Search Backend running"}
 
-@app.post("/search", response_model=SearchResultSchema)
+@app.post("/search-by-image", response_model=SearchResultSchema)
 async def search_image(file: UploadFile = File(...), top_k: int = Query(10, ge=1, le=100)):
     # Validate content type
     if file.content_type not in ("image/jpeg", "image/jpg", "image/png", "image/webp"):
@@ -103,7 +103,97 @@ async def search_image(file: UploadFile = File(...), top_k: int = Query(10, ge=1
         })
     return {"results": enriched}
 
-@app.post("/search-text", response_model=SearchResultSchema)
+@app.post("/search", response_model=SearchResultSchema)
+async def unified_search(
+    file: UploadFile = File(None),
+    query_text: str = Query(None, description="Text query to search for similar images"),
+    top_k: int = Query(10, ge=1, le=100),
+    text_weight: float = Query(0.5, ge=0.0, le=1.0, description="Weight for text vector when combining with image (0.0 = image only, 1.0 = text only)")
+):
+    """
+    Unified search endpoint that accepts text, image, or both inputs.
+    - If only text is provided: searches using text vector
+    - If only image is provided: searches using image vector  
+    - If both are provided: combines both vectors using weighted average
+    - At least one input (text or image) is required
+    """
+    # Validate that at least one input is provided
+    if not query_text and not file:
+        raise HTTPException(status_code=400, detail="At least one input (text query or image file) is required")
+    
+    # Validate text input
+    if query_text and not query_text.strip():
+        raise HTTPException(status_code=400, detail="Query text cannot be empty")
+    
+    # Validate image content type if provided
+    if file and file.content_type not in ("image/jpeg", "image/jpg", "image/png", "image/webp"):
+        raise HTTPException(status_code=415, detail="Unsupported file type")
+    
+    # validate if faiss.index exists
+    loaded = index.load_if_exists()
+    if not loaded:
+        raise HTTPException(status_code=404, detail="Index not found")
+    
+    text_vector = None
+    image_vector = None
+    
+    # Process text input
+    if query_text and query_text.strip():
+        try:
+            text_vector = vectorizer.text_to_vector(query_text.strip())
+        except Exception as e:
+            logger.exception("Text vectorization failed")
+            raise HTTPException(status_code=500, detail="Text vectorization error")
+    
+    # Process image input
+    if file:
+        # save temp file (cross-platform)
+        tmp_dir = os.getenv("TMP_DIR", tempfile.gettempdir())
+        os.makedirs(tmp_dir, exist_ok=True)
+        tmp_basename = f"{uuid.uuid4().hex}_{file.filename}"
+        tmp_path = os.path.join(tmp_dir, tmp_basename)
+        
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(await file.read())
+            
+            try:
+                image_vector = vectorizer.image_to_vector(tmp_path)
+            except Exception as e:
+                logger.exception("Image vectorization failed")
+                raise HTTPException(status_code=500, detail="Image vectorization error")
+        finally:
+            # Clean up temp file
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                logger.warning(f"Failed to remove temp file: {tmp_path}")
+    
+    # Combine vectors if both are available
+    try:
+        qvec = vectorizer.combine_vectors(text_vector, image_vector, text_weight)
+    except Exception as e:
+        logger.exception("Vector combination failed")
+        raise HTTPException(status_code=500, detail="Vector combination error")
+
+    # search
+    results = index.search(qvec, top_k=top_k)
+
+    # enrich metadata from DB
+    session = get_session()
+    enriched = []
+    for r in results:
+        meta = session.get_image_metadata(r["id"])
+        enriched.append({
+            "id": r["id"],
+            "content_type": meta.content_type if meta else None,
+            "image_url": meta.image_url if meta else None,
+            "score": r["score"]
+        })
+    return {"results": enriched}
+
+@app.post("/search-by-text", response_model=SearchResultSchema)
 async def search_by_text(query: str = Query(..., description="Text query to search for similar images"), top_k: int = Query(10, ge=1, le=100)):
     """
     Search for similar images using text query instead of image upload.
