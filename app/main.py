@@ -103,6 +103,44 @@ async def search_image(file: UploadFile = File(...), top_k: int = Query(10, ge=1
         })
     return {"results": enriched}
 
+@app.post("/search-text", response_model=SearchResultSchema)
+async def search_by_text(query: str = Query(..., description="Text query to search for similar images"), top_k: int = Query(10, ge=1, le=100)):
+    """
+    Search for similar images using text query instead of image upload.
+    Uses CLIP's text encoder to convert text to vector and search the FAISS index.
+    """
+    # Validate query
+    if not query or not query.strip():
+        raise HTTPException(status_code=400, detail="Query text cannot be empty")
+    
+    # validate if faiss.index exists
+    loaded = index.load_if_exists()
+    if not loaded:
+        raise HTTPException(status_code=404, detail="Index not found")
+    
+    # vectorize text
+    try:
+        qvec = vectorizer.text_to_vector(query.strip())
+    except Exception as e:
+        logger.exception("Text vectorization failed")
+        raise HTTPException(status_code=500, detail="Text vectorization error")
+
+    # search
+    results = index.search(qvec, top_k=top_k)
+
+    # enrich metadata from DB
+    session = get_session()
+    enriched = []
+    for r in results:
+        meta = session.get_image_metadata(r["id"])
+        enriched.append({
+            "id": r["id"],
+            "content_type": meta.content_type if meta else None,
+            "image_url": meta.image_url if meta else None,
+            "score": r["score"]
+        })
+    return {"results": enriched}
+
 @app.post("/admin/index")
 async def reindex(background_tasks: BackgroundTasks):
     background_tasks.add_task(full_reindex)

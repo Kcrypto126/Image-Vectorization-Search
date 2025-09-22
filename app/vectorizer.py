@@ -13,3 +13,12 @@ class Vectorizer:
         with torch.no_grad():
             vector = self.model.encode_image(image)
         return vector.cpu().numpy().astype("float32")  # FAISS expects float32
+
+    def text_to_vector(self, text: str):
+        """Convert text to vector using CLIP's text encoder"""
+        with torch.no_grad():
+            # Tokenize the text
+            text_tokens = clip.tokenize([text]).to(self.device)
+            # Encode text to vector
+            vector = self.model.encode_text(text_tokens)
+        return vector.cpu().numpy().astype("float32")  # FAISS expects float32
