@@ -2,6 +2,7 @@
 import torch
 import clip
 from PIL import Image
+import numpy as np
 
 class Vectorizer:
     def __init__(self, model_name="ViT-B/32", device="cpu"):
@@ -22,3 +23,24 @@ class Vectorizer:
             # Encode text to vector
             vector = self.model.encode_text(text_tokens)
         return vector.cpu().numpy().astype("float32")  # FAISS expects float32
+
+    def combine_vectors(self, text_vector: np.ndarray = None, image_vector: np.ndarray = None, text_weight: float = 0.5):
+        """
+        Combine text and image vectors using weighted average.
+        If only one vector is provided, return it directly.
+        """
+        import numpy as np
+        
+        if text_vector is not None and image_vector is not None:
+            # Both vectors provided - combine them
+            image_weight = 1.0 - text_weight
+            combined = text_weight * text_vector + image_weight * image_vector
+            return combined
+        elif text_vector is not None:
+            # Only text vector
+            return text_vector
+        elif image_vector is not None:
+            # Only image vector
+            return image_vector
+        else:
+            raise ValueError("At least one vector (text or image) must be provided")
