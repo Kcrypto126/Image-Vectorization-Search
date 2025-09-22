@@ -2,6 +2,7 @@ import os
 import tempfile
 import requests
 import json
+import time
 from urllib.parse import urlparse, urljoin
 from celery import Celery
 from dotenv import load_dotenv
@@ -12,6 +13,7 @@ import logging
 from .db import get_session, ImageMetadata, init_db
 from .vectorizer import Vectorizer
 from .index_adapter import IndexAdapter
+from .metadata import extract_image_metadata
 
 # Load environment variables from .env file
 load_dotenv()
@@ -37,16 +39,28 @@ def _get_local_path_from_url(image_url):
     """
     parsed = urlparse(image_url)
     if parsed.scheme in ("http", "https"):
-        # Download the image to a temp file
-        try:
-            resp = requests.get(image_url, timeout=10)
-            resp.raise_for_status()
-            suffix = os.path.splitext(parsed.path)[-1]
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmpf:
-                tmpf.write(resp.content)
-                return tmpf.name
-        except Exception as e:
-            raise RuntimeError(f"Failed to download image from {image_url}: {e}")
+        # Download the image to a temp file with retries and backoff
+        timeout_read = float(os.getenv("DOWNLOAD_TIMEOUT", "20"))
+        retries = int(os.getenv("DOWNLOAD_RETRIES", "3"))
+        headers = {"User-Agent": os.getenv("DOWNLOAD_UA", "VectorImageBot/1.0")}
+        last_exc = None
+        for attempt in range(retries):
+            try:
+                # connect timeout 5s, read timeout configurable
+                resp = requests.get(image_url, timeout=(5, timeout_read), headers=headers)
+                resp.raise_for_status()
+                content = resp.content
+                if not content:
+                    raise RuntimeError("Empty response body")
+                suffix = os.path.splitext(parsed.path)[-1]
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmpf:
+                    tmpf.write(content)
+                    return tmpf.name
+            except Exception as e:
+                last_exc = e
+                # exponential backoff up to 5s
+                time.sleep(min(2 ** attempt, 5))
+        raise RuntimeError(f"Failed to download image from {image_url}: {last_exc}")
     elif parsed.scheme == "" or parsed.scheme == "file":
         # Local file path
         if parsed.scheme == "file":
@@ -116,6 +130,15 @@ def full_reindex(self):
                     if v is not None and len(v) > 0:
                         vecs.append(v[0])
                         ids.append(img.id)
+                        # Also backfill metadata if missing
+                        if not img.extra_metadata:
+                            try:
+                                meta = extract_image_metadata(temp_path, vectorizer, v[0])
+                                img.extra_metadata = meta
+                                session.session.add(img)
+                                session.session.commit()
+                            except Exception:
+                                pass
                 except Exception as e:
                     print(f"Error vectorizing image {img.id}: {e}")
                 finally:
@@ -197,8 +220,14 @@ def ingest_local_images(self):
                 if v is None or len(v) == 0:
                     errors += 1
                     continue
+                # Extract metadata (colors, objects, styles)
+                try:
+                    extra_meta = extract_image_metadata(path, vectorizer, v[0])
+                except Exception:
+                    extra_meta = None
+
                 # Save DB row first
-                session.add_image(id_=img_id, content_type=content_type, image_url=image_url, metadata=None)
+                session.add_image(id_=img_id, content_type=content_type, image_url=image_url, metadata=extra_meta)
                 # Queue for index add
                 pending_vecs.append(v[0])
                 pending_ids.append(img_id)
@@ -317,6 +346,7 @@ def ingest_online_images(self):
 
                 # Vectorize from a local temp file if remote; do not persist the image
                 temp_path = None
+                extra_meta = None
                 try:
                     temp_path = _get_local_path_from_url(image_url)
                     v = vectorizer.image_to_vector(temp_path)
@@ -324,6 +354,11 @@ def ingest_online_images(self):
                         logger.warning(f"Vectorization produced empty vector for {image_url}")
                         errors += 1
                         continue
+                    # Extract metadata while the temp file still exists
+                    try:
+                        extra_meta = extract_image_metadata(temp_path, vectorizer, v[0])
+                    except Exception:
+                        extra_meta = None
                 except Exception as e:
                     logger.warning(f"Error fetching/vectorizing {image_url}: {e}")
                     errors += 1
@@ -337,8 +372,9 @@ def ingest_online_images(self):
 
                 # Save DB row first
                 img_id = str(uuid.uuid4())
+
                 try:
-                    session.add_image(id_=img_id, content_type=content_type, image_url=image_url, metadata=None)
+                    session.add_image(id_=img_id, content_type=content_type, image_url=image_url, metadata=extra_meta)
                 except Exception as db_write_exc:
                     logger.warning(f"Failed to insert image metadata for {image_url}: {db_write_exc}")
                     errors += 1
