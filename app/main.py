@@ -208,24 +208,19 @@ async def unified_search(
         objects = set([o.lower() for o in (extra.get("objects") or [])])
         style_tags = set([t.lower() for t in (extra.get("style_tags") or [])])
 
-        # Apply inclusive filters if provided
-        # if wanted_colors and not (wanted_colors & colors):
-        #     continue
-        # if wanted_objects and not (wanted_objects & objects):
-        #     continue
-        # if wanted_styles and not (wanted_styles & style_tags):
-        #     continue
+        # Apply inclusive filters if provided - now optional (no hard filtering)
+        # We no longer exclude items; matches will be rewarded in re-ranking.
 
         # Re-ranking: always apply bonus for metadata matches
         score = float(r["score"]) if r.get("score") is not None else 0.0
         bonus = 0.0
-        # if wanted_colors:
-        #     bonus += 0.02 * len(wanted_colors & colors)
-        # if wanted_objects:
-        #     bonus += 0.03 * len(wanted_objects & objects)
-        # if wanted_styles:
-        #     bonus += 0.04 * len(wanted_styles & style_tags)
-        # score += bonus
+        if wanted_colors:
+            bonus += 0.02 * len(wanted_colors & colors)
+        if wanted_objects:
+            bonus += 0.03 * len(wanted_objects & objects)
+        if wanted_styles:
+            bonus += 0.04 * len(wanted_styles & style_tags)
+        score += bonus
 
         filtered.append({
             "id": r["id"],
