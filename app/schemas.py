@@ -1,6 +1,6 @@
 # app/schemas.py
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from fastapi import UploadFile
 
 class ResultItem(BaseModel):
@@ -11,6 +11,23 @@ class ResultItem(BaseModel):
 
 class SearchResultSchema(BaseModel):
     results: List[ResultItem]
+
+
+class AdvancedSearchFilters(BaseModel):
+    style: Optional[str] = None
+    palette_contains: Optional[str] = None  # HEX
+    block: Optional[str] = None
+    device: Optional[str] = None
+    categories_contains: Optional[str] = None  # tag
+    mode: Optional[str] = None  # dark/light/mixed
+
+
+class AdvancedSearchResponseItem(ResultItem):
+    extra: Optional[Dict[str, Any]] = None
+
+
+class AdvancedSearchResponse(BaseModel):
+    results: List[AdvancedSearchResponseItem]
 
 class UnifiedSearchRequest(BaseModel):
     query_text: Optional[str] = None

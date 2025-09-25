@@ -9,7 +9,7 @@ from starlette.responses import Response
 from .vectorizer import Vectorizer
 from .index_adapter import IndexAdapter
 from .db import get_session, init_db, ImageMetadata
-from .schemas import SearchResultSchema
+from .schemas import SearchResultSchema, AdvancedSearchFilters, AdvancedSearchResponse, AdvancedSearchResponseItem
 from .storage import save_image
 from .tasks import full_reindex, ingest_local_images, ingest_online_images
 from .db import ImageMetadata
@@ -271,6 +271,111 @@ async def search_by_text(query: str = Query(..., description="Text query to sear
         })
     return {"results": enriched}
 
+
+@app.post("/search-advanced", response_model=AdvancedSearchResponse)
+async def search_advanced(
+    query: str = Query("", description="Text query (optional)"),
+    top_k: int = Query(24, ge=1, le=100),
+    style: str = Query(None),
+    palette_contains: str = Query(None),
+    block: str = Query(None),
+    device: str = Query(None),
+    categories_contains: str = Query(None),
+    mode: str = Query(None),
+):
+    loaded = index.load_if_exists()
+    if not loaded:
+        raise HTTPException(status_code=404, detail="Index not found")
+
+    # query vector (optional)
+    qvec = None
+    if query and query.strip():
+        try:
+            qvec = vectorizer.text_to_vector(query.strip())
+        except Exception:
+            qvec = None
+    if qvec is None:
+        # use zero vector to fetch a pool, then filter
+        import numpy as np
+        qvec = np.zeros((1, index.dim), dtype="float32")
+
+    initial_k = max(top_k, 100)
+    candidates = index.search(qvec, top_k=initial_k)
+
+    session = get_session()
+    results: list = []
+    for r in candidates:
+        meta = session.get_image_metadata(r["id"])  # type: ImageMetadata
+        if not meta:
+            continue
+        raw = meta.raw_detections or {}
+        gen = meta.generated_metadata or {}
+        extra = meta.extra_metadata or {}
+
+        # Filtering
+        if style:
+            st = (gen.get("Visual style") or extra.get("style_tags") or [])
+            st_l = [s.lower() for s in (st if isinstance(st, list) else [st]) if isinstance(s, str)]
+            if style.lower() not in st_l:
+                continue
+        if palette_contains:
+            palette_hex = []
+            if isinstance(gen.get("Palette"), list):
+                for p in gen["Palette"]:
+                    if isinstance(p, dict) and p.get("hex"):
+                        palette_hex.append(p.get("hex").lower())
+            palette_hex.extend([h.lower() for h in (raw.get("palette_hex") or [])])
+            if palette_contains.lower() not in palette_hex:
+                continue
+        if block:
+            blk = gen.get("Block")
+            blk_l = [b.lower() for b in (blk if isinstance(blk, list) else [blk]) if isinstance(b, str)]
+            if block.lower() not in blk_l:
+                continue
+        if device:
+            dev = gen.get("Device")
+            dev_l = [d.lower() for d in (dev if isinstance(dev, list) else [dev]) if isinstance(d, str)]
+            if device.lower() not in dev_l:
+                continue
+        if categories_contains:
+            cats = gen.get("Categories") or []
+            cats_l = [c.lower() for c in cats if isinstance(c, str)]
+            if categories_contains.lower() not in cats_l:
+                continue
+        if mode:
+            m = gen.get("Mode")
+            if isinstance(m, str) and m.lower() != mode.lower():
+                continue
+
+        results.append({
+            "id": r["id"],
+            "content_type": meta.content_type,
+            "image_url": meta.image_url,
+            "score": float(r.get("score") or 0.0),
+            "extra": {
+                "raw": raw,
+                "generated": gen,
+            }
+        })
+
+    # simple rerank bonus for exact palette/tag matches
+    if palette_contains:
+        for item in results:
+            pal = ((item.get("extra") or {}).get("raw") or {}).get("palette_hex") or []
+            if palette_contains.lower() in [h.lower() for h in pal]:
+                item["score"] += 0.05
+    if style:
+        for item in results:
+            vs = ((item.get("extra") or {}).get("generated") or {}).get("Visual style") or []
+            vs_l = [s.lower() for s in (vs if isinstance(vs, list) else [vs]) if isinstance(s, str)]
+            if style.lower() in vs_l:
+                item["score"] += 0.04
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    # trim and map to model
+    final_items = [AdvancedSearchResponseItem(**item) for item in results[:top_k]]
+    return {"results": final_items}
+
 @app.post("/admin/index")
 async def reindex(background_tasks: BackgroundTasks):
     background_tasks.add_task(full_reindex)
@@ -327,12 +432,17 @@ async def upload_image(file: UploadFile = File(...)):
         except Exception:
             logger.exception("Vectorization failed during upload; record saved without index update")
         extra_meta = None
+        raw_det = None
+        gen_meta = None
         try:
             if vec is not None and len(vec) > 0:
-                extra_meta = extract_image_metadata(tmp_path, vectorizer, vec[0])
+                meta_bundle = extract_image_metadata(tmp_path, vectorizer, vec[0]) or {}
+                extra_meta = meta_bundle.get("extra_metadata")
+                raw_det = meta_bundle.get("raw_detections")
+                gen_meta = meta_bundle.get("generated_metadata")
         except Exception:
             pass
-        session.add_image(id_=image_id, content_type=file.content_type, image_url=stored_url, metadata=extra_meta)
+        session.add_image(id_=image_id, content_type=file.content_type, image_url=stored_url, metadata=extra_meta, raw_detections=raw_det, generated_metadata=gen_meta)
         # Vectorize and add to index incrementally
         try:
             if vec is not None and len(vec) > 0:

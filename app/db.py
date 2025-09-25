@@ -1,5 +1,5 @@
 # app/db.py
-from sqlalchemy import create_engine, Column, String, DateTime, JSON
+from sqlalchemy import create_engine, Column, String, DateTime, JSON, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 import os
@@ -22,6 +22,9 @@ class ImageMetadata(Base):
     image_url = Column(String, nullable=False)
     # 'metadata' is reserved by SQLAlchemy's Declarative API; map to column name 'metadata'
     extra_metadata = Column('metadata', JSON, nullable=True)
+    # New fields
+    raw_detections = Column(JSON, nullable=True)
+    generated_metadata = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 def init_db(database_url: str = None):
@@ -30,13 +33,38 @@ def init_db(database_url: str = None):
         engine = create_engine(database_url, pool_pre_ping=True)
         SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
     Base.metadata.create_all(engine)
+    # Lightweight auto-migration for adding new JSON columns if the table already exists
+    try:
+        inspector = inspect(engine)
+        cols = {c['name'] for c in inspector.get_columns('images')}
+        with engine.begin() as conn:
+            if 'raw_detections' not in cols:
+                try:
+                    conn.execute(text("ALTER TABLE images ADD COLUMN raw_detections JSON"))
+                except Exception:
+                    pass
+            if 'generated_metadata' not in cols:
+                try:
+                    conn.execute(text("ALTER TABLE images ADD COLUMN generated_metadata JSON"))
+                except Exception:
+                    pass
+    except Exception:
+        # Best-effort; ignore migration errors in lightweight setup
+        pass
 
 class DBSession:
     def __init__(self):
         self.session = SessionLocal()
 
-    def add_image(self, id_, content_type, image_url, metadata=None):
-        img = ImageMetadata(id=id_, content_type=content_type, image_url=image_url, extra_metadata=metadata)
+    def add_image(self, id_, content_type, image_url, metadata=None, raw_detections=None, generated_metadata=None):
+        img = ImageMetadata(
+            id=id_,
+            content_type=content_type,
+            image_url=image_url,
+            extra_metadata=metadata,
+            raw_detections=raw_detections,
+            generated_metadata=generated_metadata,
+        )
         self.session.add(img)
         self.session.commit()
 
