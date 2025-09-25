@@ -21,3 +21,6 @@ dotenv
 requests
 colorthief
 ultralytics
+layoutparser
+pytesseract
+openai

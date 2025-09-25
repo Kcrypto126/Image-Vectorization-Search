@@ -220,14 +220,24 @@ def ingest_local_images(self):
                 if v is None or len(v) == 0:
                     errors += 1
                     continue
-                # Extract metadata (colors, objects, styles)
+                # Extract metadata (raw + generated)
                 try:
-                    extra_meta = extract_image_metadata(path, vectorizer, v[0])
+                    meta_bundle = extract_image_metadata(path, vectorizer, v[0]) or {}
+                    extra_meta = meta_bundle.get("extra_metadata")
+                    raw_det = meta_bundle.get("raw_detections")
+                    gen_meta = meta_bundle.get("generated_metadata")
                 except Exception:
-                    extra_meta = None
+                    extra_meta, raw_det, gen_meta = None, None, None
 
                 # Save DB row first
-                session.add_image(id_=img_id, content_type=content_type, image_url=image_url, metadata=extra_meta)
+                session.add_image(
+                    id_=img_id,
+                    content_type=content_type,
+                    image_url=image_url,
+                    metadata=extra_meta,
+                    raw_detections=raw_det,
+                    generated_metadata=gen_meta,
+                )
                 # Queue for index add
                 pending_vecs.append(v[0])
                 pending_ids.append(img_id)
@@ -356,9 +366,12 @@ def ingest_online_images(self):
                         continue
                     # Extract metadata while the temp file still exists
                     try:
-                        extra_meta = extract_image_metadata(temp_path, vectorizer, v[0])
+                        meta_bundle = extract_image_metadata(temp_path, vectorizer, v[0]) or {}
+                        extra_meta = meta_bundle.get("extra_metadata")
+                        raw_det = meta_bundle.get("raw_detections")
+                        gen_meta = meta_bundle.get("generated_metadata")
                     except Exception:
-                        extra_meta = None
+                        extra_meta, raw_det, gen_meta = None, None, None
                 except Exception as e:
                     logger.warning(f"Error fetching/vectorizing {image_url}: {e}")
                     errors += 1
@@ -374,7 +387,14 @@ def ingest_online_images(self):
                 img_id = str(uuid.uuid4())
 
                 try:
-                    session.add_image(id_=img_id, content_type=content_type, image_url=image_url, metadata=extra_meta)
+                    session.add_image(
+                        id_=img_id,
+                        content_type=content_type,
+                        image_url=image_url,
+                        metadata=extra_meta,
+                        raw_detections=raw_det,
+                        generated_metadata=gen_meta,
+                    )
                 except Exception as db_write_exc:
                     logger.warning(f"Failed to insert image metadata for {image_url}: {db_write_exc}")
                     errors += 1
