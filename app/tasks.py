@@ -1,7 +1,6 @@
 import os
 import tempfile
 import requests
-import json
 import time
 from urllib.parse import urlparse, urljoin
 from celery import Celery
