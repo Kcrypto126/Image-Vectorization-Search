@@ -192,6 +192,30 @@ async def search(
         mode = mode.lower()
         components = set([c.lower() for c in (raw.get("components") or [])])
         
+        # Additional metadata fields for enhanced matching
+        blocks = set([b.lower() for b in (generated.get("Block") or [])])
+        devices = set([d.lower() for d in (generated.get("Device") or [])])
+        logo_elements = set([le.lower() for le in (generated.get("Logo elements") or [])])
+        content_hints = set([ch.lower() for ch in (generated.get("Content hints") or [])])
+        main_components = set([mc.lower() for mc in (generated.get("Main components") or [])])
+        
+        # Additional design metadata fields
+        icons_illustrations = set([ii.lower() for ii in (generated.get("Icons / Illustrations") or [])])
+        complexity = (generated.get("Complexity") or "")
+        if isinstance(complexity, list):
+            complexity = " ".join(str(item) for item in complexity)
+        complexity = complexity.lower()
+        
+        data_density = (generated.get("Data density") or "")
+        if isinstance(data_density, list):
+            data_density = " ".join(str(item) for item in data_density)
+        data_density = data_density.lower()
+        
+        verdict = (generated.get("Verdict") or "")
+        if isinstance(verdict, list):
+            verdict = " ".join(str(item) for item in verdict)
+        verdict = verdict.lower()
+        
         # Enhanced re-ranking with comprehensive metadata matching
         score = float(r["score"]) if r.get("score") is not None else 0.0
         bonus = 0.0
@@ -241,6 +265,42 @@ async def search(
         # Component matching
         if query_tokens & components:
             bonus += 0.04 * len(query_tokens & components)
+        
+        # Block matching (design system blocks)
+        if query_tokens & blocks:
+            bonus += 0.06 * len(query_tokens & blocks)
+        
+        # Device matching (mobile, desktop, responsive)
+        if query_tokens & devices:
+            bonus += 0.05 * len(query_tokens & devices)
+        
+        # Logo elements matching
+        if query_tokens & logo_elements:
+            bonus += 0.07 * len(query_tokens & logo_elements)
+        
+        # Content hints matching
+        if query_tokens & content_hints:
+            bonus += 0.05 * len(query_tokens & content_hints)
+        
+        # Main components matching (from generated metadata)
+        if query_tokens & main_components:
+            bonus += 0.06 * len(query_tokens & main_components)
+        
+        # Icons/Illustrations matching
+        if query_tokens & icons_illustrations:
+            bonus += 0.05 * len(query_tokens & icons_illustrations)
+        
+        # Complexity matching
+        if any(token in complexity for token in query_tokens):
+            bonus += 0.04
+        
+        # Data density matching
+        if any(token in data_density for token in query_tokens):
+            bonus += 0.04
+        
+        # Verdict matching (expert assessment)
+        if any(token in verdict for token in query_tokens):
+            bonus += 0.08
         
         # Exact phrase matching in OCR text (highest weight)
         if query_lower in ocr_text:
