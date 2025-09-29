@@ -9,7 +9,7 @@ import numpy as np
 import uuid
 import logging
 
-from .db import get_session, ImageMetadata, init_db
+from .db import get_session, ImageMetadata, init_db, Interaction
 from .vectorizer import Vectorizer
 from .index_adapter import IndexAdapter
 from .metadata import extract_image_metadata
@@ -20,6 +20,65 @@ logger = logging.getLogger(__name__)
 
 CELERY_BROKER = os.getenv("CELERY_BROKER", "redis://redis:6379/0")
 celery = Celery('tasks', broker=CELERY_BROKER)
+
+def _pair_key(a: str, b: str):
+    if a <= b:
+        return (a, b)
+    return (b, a)
+
+@celery.task(bind=True)
+def rebuild_taste_graph(self):
+    """
+    Build item-item cooccurrence scores from user interactions.
+    Score heuristic: for each user, for each pair of interacted items, add
+    weight = w_i * w_j * event_strength_i * event_strength_j.
+    Then normalize per-item and write to DB via upsert.
+    """
+    init_db(os.getenv("DATABASE_URL"))
+    session = get_session()
+    try:
+        # Fetch interactions grouped by user
+        all_interactions = session.session.query(Interaction).all()
+        by_user = {}
+        for it in all_interactions:
+            by_user.setdefault(it.user_id, []).append(it)
+
+        pair_scores = {}
+        # Event strengths
+        strengths = {"like": 1.0, "save": 1.2, "click": 0.6, "view": 0.2}
+        for user_id, items in by_user.items():
+            # Accumulate per image weight for the user
+            per_image = {}
+            for it in items:
+                s = strengths.get(it.event, 0.3) * float(it.weight or 1.0)
+                per_image[it.image_id] = per_image.get(it.image_id, 0.0) + s
+            image_ids = list(per_image.keys())
+            # Update pairwise scores
+            for i in range(len(image_ids)):
+                for j in range(i + 1, len(image_ids)):
+                    a = image_ids[i]
+                    b = image_ids[j]
+                    w = per_image[a] * per_image[b]
+                    key = _pair_key(a, b)
+                    pair_scores[key] = pair_scores.get(key, 0.0) + w
+
+        # Optional: normalization step - scale scores into [0,1] via max
+        if pair_scores:
+            max_score = max(pair_scores.values()) or 1.0
+        else:
+            max_score = 1.0
+
+        # Persist
+        for (a, b), s in pair_scores.items():
+            norm = float(s) / max_score
+            # Avoid extremely small values
+            if norm < 1e-6:
+                continue
+            session.upsert_cooccurrence(a, b, norm)
+
+        return {"status": "done", "pairs": len(pair_scores)}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 def _guess_content_type_from_ext(path: str):
     ext = os.path.splitext(path)[1].lower()
@@ -210,6 +269,8 @@ def ingest_local_images(self):
             except Exception:
                 # If querying fails for some reason, attempt to continue
                 pass
+            
+            print(f"Ingesting image: {image_url}")
 
             try:
                 img_id = str(uuid.uuid4())

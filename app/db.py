@@ -1,5 +1,5 @@
 # app/db.py
-from sqlalchemy import create_engine, Column, String, DateTime, JSON, inspect, text
+from sqlalchemy import create_engine, Column, String, DateTime, JSON, inspect, text, Integer, Float, Index
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 import os
@@ -26,6 +26,27 @@ class ImageMetadata(Base):
     raw_detections = Column(JSON, nullable=True)
     generated_metadata = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+class Interaction(Base):
+    __tablename__ = "interactions"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, nullable=False, index=True)
+    image_id = Column(String, nullable=False, index=True)
+    event = Column(String, nullable=False)  # like, click, save, view
+    weight = Column(Float, nullable=False, default=1.0)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+Index('ix_interactions_user_image', Interaction.user_id, Interaction.image_id)
+
+class ItemCooccurrence(Base):
+    __tablename__ = "item_cooccurrence"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    item_a = Column(String, nullable=False, index=True)
+    item_b = Column(String, nullable=False, index=True)
+    score = Column(Float, nullable=False, default=0.0)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+Index('ix_item_pair', ItemCooccurrence.item_a, ItemCooccurrence.item_b, unique=True)
 
 def init_db(database_url: str = None):
     if database_url:
@@ -70,6 +91,42 @@ class DBSession:
 
     def get_image_metadata(self, id_):
         return self.session.get(ImageMetadata, id_)
+
+    # Taste graph helpers
+    def record_interaction(self, user_id: str, image_id: str, event: str, weight: float):
+        it = Interaction(user_id=user_id, image_id=image_id, event=event, weight=weight)
+        self.session.add(it)
+        self.session.commit()
+        return it
+
+    def get_user_interactions(self, user_id: str):
+        return self.session.query(Interaction).filter(Interaction.user_id == user_id).all()
+
+    def upsert_cooccurrence(self, item_a: str, item_b: str, score: float):
+        if not item_a or not item_b or item_a == item_b:
+            return
+        # Ensure deterministic order to avoid duplicates
+        a, b = (item_a, item_b) if item_a < item_b else (item_b, item_a)
+        existing = self.session.query(ItemCooccurrence).filter(
+            ItemCooccurrence.item_a == a, ItemCooccurrence.item_b == b
+        ).first()
+        if existing:
+            existing.score = float(score)
+        else:
+            self.session.add(ItemCooccurrence(item_a=a, item_b=b, score=float(score)))
+        self.session.commit()
+
+    def get_neighbors(self, item_id: str, top_k: int = 50):
+        # Return neighbors for both (item_id, *) regardless of order
+        rows = self.session.query(ItemCooccurrence).filter(
+            (ItemCooccurrence.item_a == item_id) | (ItemCooccurrence.item_b == item_id)
+        ).all()
+        neighbors = []
+        for r in rows:
+            other = r.item_b if r.item_a == item_id else r.item_a
+            neighbors.append((other, float(r.score)))
+        neighbors.sort(key=lambda x: x[1], reverse=True)
+        return neighbors[:top_k]
 
 def get_session():
     return DBSession()
