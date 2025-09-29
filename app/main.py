@@ -8,10 +8,10 @@ from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_
 from starlette.responses import Response
 from .vectorizer import Vectorizer
 from .index_adapter import IndexAdapter
-from .db import get_session, init_db, ImageMetadata
+from .db import get_session, init_db, ImageMetadata, Interaction
 from .schemas import SearchResultSchema
 from .storage import save_image
-from .tasks import full_reindex, ingest_local_images, ingest_online_images
+from .tasks import full_reindex, ingest_local_images, ingest_online_images, rebuild_taste_graph
 from .db import ImageMetadata
 from .metadata import extract_image_metadata, detect_filters_from_text
 import tempfile
@@ -68,7 +68,8 @@ async def root():
 async def search(
     query: str = Query(None, description="Text query to search for similar images"),
     file: UploadFile = File(None, description="Target image"),
-    top_k: int = Query(10, ge=1, le=100)
+    top_k: int = Query(10, ge=1, le=100),
+    user_id: str = Query(None, description="User id to personalize results via Taste Graph"),
 ):
     """
     Enhanced search endpoint that accepts text query, image file, or both inputs.
@@ -155,6 +156,41 @@ async def search(
     
     # enrich metadata from DB and filter/re-rank
     session = get_session()
+    # Taste Graph: if user_id provided, compute personalized boosts based on interactions and co-occurrences
+    user_boosts = {}
+    if user_id:
+        try:
+            interactions = session.get_user_interactions(user_id)
+            # Aggregate weights per image the user interacted with
+            liked = {}
+            for it in interactions:
+                base = 0.0
+                if it.event == "like":
+                    base = 1.0
+                elif it.event == "click":
+                    base = 0.5
+                elif it.event == "save":
+                    base = 1.2
+                elif it.event == "view":
+                    base = 0.2
+                w = float(it.weight or 1.0)
+                liked[it.image_id] = liked.get(it.image_id, 0.0) + base * w
+            # Expand via co-occurrence neighbors
+            neighbor_scores = {}
+            for img_id, w in liked.items():
+                try:
+                    neighbors = session.get_neighbors(img_id, top_k=50)
+                    for nid, ns in neighbors:
+                        neighbor_scores[nid] = neighbor_scores.get(nid, 0.0) + float(ns) * w
+                except Exception:
+                    pass
+            # Combine direct liked and neighbors
+            for img_id, w in liked.items():
+                user_boosts[img_id] = user_boosts.get(img_id, 0.0) + 0.5 * w
+            for nid, s in neighbor_scores.items():
+                user_boosts[nid] = user_boosts.get(nid, 0.0) + 0.3 * s
+        except Exception:
+            pass
     filtered = []
     for r in results:
         meta = session.get_image_metadata(r["id"])  # type: ImageMetadata
@@ -310,6 +346,10 @@ async def search(
         if query_lower in description:
             bonus += 0.15
         
+        # Personalized boost
+        if user_id and r["id"] in user_boosts:
+            bonus += min(0.5, 0.05 + 0.1 * (user_boosts[r["id"]] ** 0.5))
+
         score += bonus
 
         filtered.append({
@@ -349,6 +389,12 @@ async def ingest_from_online(background_tasks: BackgroundTasks):
     background_tasks.add_task(ingest_online_images)
     logger.info("Ingest from api started...loading...")
     return {"status": "ingest started"}
+
+@app.post("/admin/rebuild-taste-graph")
+async def admin_rebuild_taste_graph(background_tasks: BackgroundTasks):
+    background_tasks.add_task(rebuild_taste_graph)
+    logger.info("Rebuild taste graph started...loading...")
+    return {"status": "taste graph rebuild started"}
 
 @app.post("/uploads")
 async def upload_image(file: UploadFile = File(...)):
@@ -408,3 +454,27 @@ async def upload_image(file: UploadFile = File(...)):
                 os.remove(tmp_path)
         except Exception:
             logger.warning(f"Failed to remove temp file: {tmp_path}")
+
+@app.post("/events")
+async def record_event(
+    user_id: str = Query(..., description="User id"),
+    image_id: str = Query(..., description="Image id"),
+    event: str = Query(..., description="Event type: like, click, save, view")
+):
+    if event not in {"like", "click", "save", "view"}:
+        raise HTTPException(status_code=400, detail="Invalid event type")
+    # Determine weight automatically based on event type
+    event_weights = {
+        "like": 1.0,
+        "click": 0.5,
+        "save": 1.2,
+        "view": 0.2
+    }
+    weight = event_weights.get(event, 1.0)
+    try:
+        session = get_session()
+        session.record_interaction(user_id=user_id, image_id=image_id, event=event, weight=weight)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.exception("Failed to record event")
+        raise HTTPException(status_code=500, detail="Failed to record event")
