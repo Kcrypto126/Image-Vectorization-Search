@@ -170,13 +170,26 @@ async def search(
         colors = set([c.lower() for c in (extra.get("colors") or [])])
         objects = set([o.lower() for o in (extra.get("objects") or [])])
         style_tags = set([t.lower() for t in (extra.get("style_tags") or [])])
-        ocr_text = (raw.get("ocr_text") or "").lower()
+        ocr_text = (raw.get("ocr_text") or "")
+        if isinstance(ocr_text, list):
+            ocr_text = " ".join(str(item) for item in ocr_text)
+        ocr_text = ocr_text.lower()
         categories = set([c.lower() for c in (generated.get("Categories") or [])])
         visual_style = set([s.lower() for s in (generated.get("Visual style") or [])])
         keywords = set([k.lower() for k in (generated.get("Keywords") or [])])
-        description = (generated.get("Description") or "").lower()
-        layout = (generated.get("Layout") or "").lower()
-        mode = (generated.get("Mode") or "").lower()
+        description = (generated.get("Description") or "")
+        if isinstance(description, list):
+            description = " ".join(str(item) for item in description)
+        description = description.lower()
+        layout = (generated.get("Layout") or "")
+        if isinstance(layout, list):
+            layout = " ".join(str(item) for item in layout)
+        layout = layout.lower()
+        
+        mode = (generated.get("Mode") or "")
+        if isinstance(mode, list):
+            mode = " ".join(str(item) for item in mode)
+        mode = mode.lower()
         components = set([c.lower() for c in (raw.get("components") or [])])
         
         # Enhanced re-ranking with comprehensive metadata matching
