@@ -5,6 +5,10 @@ import logging
 from typing import Dict, List, Tuple, Optional
 import json
 import re
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 from colorthief import ColorThief
 from PIL import Image
@@ -232,7 +236,6 @@ def detect_layout(image_path: str) -> Dict:
     if not _CV_AVAILABLE:
         return {"layout": None, "components": []}
     try:
-        print("----> opencv")
         img = cv2.imread(image_path)
         if img is None:
             return {"layout": None, "components": []}
