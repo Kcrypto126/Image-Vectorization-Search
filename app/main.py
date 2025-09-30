@@ -74,7 +74,7 @@ async def search(
     """
     Enhanced search endpoint that accepts text query, image file, or both inputs.
     - If only text is provided: searches using text vector
-    - If only image is provided: searches using image vector  
+    - If only image is provided: searches using image vector
     - If both are provided: combines both vectors using weighted average
     - At least one input (text or image) is required
     - Enhanced metadata filtering and ranking based on all available metadata
