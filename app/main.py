@@ -364,8 +364,6 @@ async def search(
     return {"results": filtered[:top_k]}
 
 
-
-
 @app.post("/admin/index")
 async def reindex(background_tasks: BackgroundTasks):
     background_tasks.add_task(full_reindex)
