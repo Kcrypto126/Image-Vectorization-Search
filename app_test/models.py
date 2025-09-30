@@ -16,11 +16,3 @@ def init_db(uri="postgresql://postgres:Roastery818@localhost:5432/imagedb"):
     engine = create_engine(uri)
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine)
-
-# def init_db(uri=None):
-#     # Prefer explicit uri, then DATABASE_URL env var, default to SQLite for local dev
-#     database_url = uri or os.getenv("DATABASE_URL", "sqlite:///./app.db")
-#     connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
-#     engine = create_engine(database_url, connect_args=connect_args)
-#     Base.metadata.create_all(engine)
-#     return sessionmaker(bind=engine)
