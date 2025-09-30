@@ -412,7 +412,7 @@ _ALLOWED_LAYOUT = ["one column","card grid","split"]
 _ALLOWED_VISUAL_STYLE = ["minimal","brutalist","glassmorphism","neumorphism","gradient","3d","illustration","photography","dark","light"]
 
 
-def _gpt_generate_metadata(objects: List[str], colors_hex: List[str], layout: Optional[str], style_tags: List[str], ocr_text: str, components: List[str], image_path: Optional[str]) -> Optional[Dict]:
+def _gpt_generate_metadata(objects: List[str], colors_hex: List[str], layout: Optional[str], style_tags: List[str], ocr_text: str, image_path: Optional[str]) -> Optional[Dict]:
     """
     Calls OpenAI (if available) to generate expert metadata JSON per spec.
     Falls back to heuristic if API not configured.
@@ -446,13 +446,13 @@ def _gpt_generate_metadata(objects: List[str], colors_hex: List[str], layout: Op
             "Palette, Typography, Icons / Illustrations, Complexity, Data density, Verdict, Keywords, Description, Mode.\n"
             "Rules: Categories 5–6 items from list (no leading #). Mode in {dark, light, mixed}. Keywords 10–25 items. "
             "Verdict format example: 'Ideal for X because Y. Confidence at 0.87'. Description: expert-level, cohesive English.\n"
+            f"{'If ocr_text is empty string, set Typography to {{}}.' if (ocr_text == '') else ''}"
             "Detections: " + json.dumps({
                 "objects": objects,
                 "colors_hex": colors_hex,
                 "layout": layout,
                 "styles": style_tags,
                 "ocr_text": ocr_text,
-                "components": components,
             })
         )
 
@@ -581,7 +581,6 @@ def extract_image_metadata(image_path: str, vectorizer, image_vec_row) -> Dict:
         "styles_clip": styles,
         "style_tags": style_tags,
         "layout": layout_info.get("layout"),
-        "components": layout_info.get("components", []),
         "ocr_text": ocr_text,
     }
 
@@ -600,22 +599,11 @@ def extract_image_metadata(image_path: str, vectorizer, image_vec_row) -> Dict:
         layout=layout_info.get("layout"),
         style_tags=style_tags,
         ocr_text=ocr_text,
-        components=layout_info.get("components", []),
         image_path=image_path,
     )
     if generated is None:
         # Fallback heuristic
-        generated = {
-            "Categories": ["#brand_identity", "#visual_identity", "#color_palette", "#typography_system", "#web_branding"],
-            "Layout": layout_info.get("layout") or "one column",
-            "Visual style": list(style_tags)[:3] or ["minimal"],
-            "Palette": [{"hex": h, "theme": "primary" if i == 0 else ("secondary" if i == 1 else "accent")} for i, h in enumerate(colors.get("palette_hex", [])[:3])],
-            "Main components": layout_info.get("components", []),
-            "Keywords": list(filter(None, objects + style_tags))[:12],
-            "Mode": "dark" if "black" in colors.get("colors", []) else "light",
-            "Verdict": "Suitable for modern interfaces; heuristic metadata; confidence 0.4",
-            "Description": "Automatically inferred branding attributes using heuristics in absence of LLM response.",
-        }
+        generated = {}
 
     return {
         "extra_metadata": extra_metadata,
