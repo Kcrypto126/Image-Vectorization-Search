@@ -11,6 +11,8 @@ S3_ENDPOINT = os.getenv("S3_ENDPOINT_URL")
 S3_KEY = os.getenv("S3_ACCESS_KEY")
 S3_SECRET = os.getenv("S3_SECRET_KEY")
 
+local_feed_url = os.getenv("LOCAL_FEED_URL", "http://127.0.0.1:8000/data/images")
+
 def save_image(filename: str, content: bytes) -> str:
     if STORAGE_BACKEND == "s3":
         s3 = boto3.client(
@@ -27,4 +29,4 @@ def save_image(filename: str, content: bytes) -> str:
         path = f"data/images/{filename}"
         with open(path, "wb") as f:
             f.write(content)
-        return f"http://127.0.0.1:8000/data/images/{filename}"
+        return f"{local_feed_url}/{filename}"
