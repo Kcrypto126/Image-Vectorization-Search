@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 CELERY_BROKER = os.getenv("CELERY_BROKER", "redis://redis:6379/0")
 celery = Celery('tasks', broker=CELERY_BROKER)
+local_feed_url = os.getenv("LOCAL_FEED_URL", "http://127.0.0.1:8000/data/images")
 
 def _pair_key(a: str, b: str):
     if a <= b:
@@ -258,7 +259,7 @@ def ingest_local_images(self):
                 continue
 
             # Build the public URL served by FastAPI static files
-            image_url = f"http://127.0.0.1:8000/data/images/{name}"
+            image_url = f"{local_feed_url}/{name}"
 
             # Skip if already ingested (by URL)
             try:
