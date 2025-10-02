@@ -42,7 +42,7 @@ FastAPI backend to analyze images, vectorize them, generate metadata (colors, ob
 Start the FastAPI server with uvicorn:
 
 ```bash
-uvicorn app.main:app --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --root-path /api
 ```
 
 By default, the service will attempt to load an existing vector index and expose endpoints for search and ingestion tasks.

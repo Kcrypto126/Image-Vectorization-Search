@@ -35,6 +35,7 @@ DIM = int(os.getenv("VECTOR_DIM", "512"))
 INDEX_BACKEND = os.getenv("INDEX_BACKEND", "faiss")  # or 'qdrant'
 
 app = FastAPI(title="Image Search Service")
+# app = FastAPI(root_path="/api", title="Image Search Service")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
