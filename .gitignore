@@ -58,4 +58,4 @@ __pypackages__/
 
 
 # Data
-data/
+data/images/*
