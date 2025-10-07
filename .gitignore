@@ -43,6 +43,7 @@ dist/
 
 # FAISS index
 faiss.index
+faiss.index.ids
 
 # Uploads (keep folder, ignore contents)
 uploads/
