@@ -8,11 +8,13 @@ from dotenv import load_dotenv
 import numpy as np
 import uuid
 import logging
+from typing import List, Tuple
 
-from .db import get_session, ImageMetadata, init_db, Interaction
+from .db import get_session, ImageMetadata, init_db, Interaction, User
 from .vectorizer import Vectorizer
 from .index_adapter import IndexAdapter
 from .metadata import extract_image_metadata
+from .taste_graph import get_taste_graph_manager
 
 # Load environment variables from .env file
 load_dotenv()
@@ -190,10 +192,10 @@ def full_reindex(self):
                         vecs.append(v[0])
                         ids.append(img.id)
                         # Also backfill metadata if missing
-                        if not img.extra_metadata:
+                        if not img.image_metadata:
                             try:
                                 meta = extract_image_metadata(temp_path, vectorizer, v[0])
-                                img.extra_metadata = meta
+                                img.image_metadata = meta
                                 session.session.add(img)
                                 session.session.commit()
                             except Exception:
@@ -501,3 +503,153 @@ def ingest_online_images(self):
         return {"status": "done", "processed": processed, "skipped": skipped, "errors": errors}
     except Exception as e:
         return {"status": "error", "error": str(e), "processed": processed, "skipped": skipped, "errors": errors}
+
+@celery.task(bind=True)
+def train_pinsage_model(self, epochs: int = 10, user_ids: List[str] = None):
+    """
+    Train PinSage model offline for long-term taste pattern learning.
+    """
+    init_db(os.getenv("DATABASE_URL"))
+    session = get_session()
+    
+    try:
+        # Get taste graph manager
+        taste_graph_manager = get_taste_graph_manager(session, None)
+        
+        if not taste_graph_manager:
+            logger.error("Taste graph manager not available")
+            return {"status": "error", "error": "Taste graph manager not available"}
+        
+        # Run offline training
+        result = taste_graph_manager.run_offline_training(user_ids, epochs)
+        
+        logger.info(f"PinSage training completed: {result}")
+        return result
+        
+    except Exception as e:
+        logger.exception(f"PinSage training failed: {e}")
+        return {"status": "error", "error": str(e)}
+
+@celery.task(bind=True)
+def rebuild_taste_graph_task(self):
+    """
+    Rebuild the entire taste graph from scratch.
+    """
+    init_db(os.getenv("DATABASE_URL"))
+    session = get_session()
+    
+    try:
+        # Get taste graph manager
+        taste_graph_manager = get_taste_graph_manager(session, None)
+        
+        if not taste_graph_manager:
+            logger.error("Taste graph manager not available")
+            return {"status": "error", "error": "Taste graph manager not available"}
+        
+        # Rebuild taste graph
+        result = taste_graph_manager.rebuild_taste_graph()
+        
+        logger.info(f"Taste graph rebuild completed: {result}")
+        return result
+        
+    except Exception as e:
+        logger.exception(f"Taste graph rebuild failed: {e}")
+        return {"status": "error", "error": str(e)}
+
+@celery.task(bind=True)
+def extract_topics_from_images(self):
+    """
+    Extract topics from all images and create topic associations.
+    """
+    init_db(os.getenv("DATABASE_URL"))
+    session = get_session()
+    
+    try:
+        # Get all images without topics
+        images = session.session.query(ImageMetadata).all()
+        
+        processed = 0
+        errors = 0
+        
+        for img in images:
+            try:
+                # Extract topics from metadata
+                topics = _extract_topics_from_metadata(img)
+                
+                # Create topic associations
+                for topic_name, confidence in topics:
+                    topic_id = _get_or_create_topic(session, topic_name)
+                    session.add_pin_to_topic(img.id, topic_id, confidence)
+                
+                processed += 1
+                
+            except Exception as e:
+                logger.warning(f"Failed to process image {img.id}: {e}")
+                errors += 1
+        
+        logger.info(f"Topic extraction completed: {processed} processed, {errors} errors")
+        return {"status": "done", "processed": processed, "errors": errors}
+        
+    except Exception as e:
+        logger.exception(f"Topic extraction failed: {e}")
+        return {"status": "error", "error": str(e)}
+
+def _extract_topics_from_metadata(image_meta) -> List[Tuple[str, float]]:
+    """Extract topic names and confidence scores from image metadata"""
+    topics = []
+    
+    # Extract from generated metadata
+    if image_meta.generated_metadata:
+        gen_meta = image_meta.generated_metadata
+        
+        # Categories as topics
+        categories = gen_meta.get('Categories', [])
+        for cat in categories[:3]:  # Top 3 categories
+            topics.append((cat.lower(), 0.8))
+        
+        # Visual style as topics
+        visual_styles = gen_meta.get('Visual style', [])
+        for style in visual_styles[:2]:  # Top 2 styles
+            topics.append((style.lower(), 0.6))
+        
+        # Keywords as topics
+        keywords = gen_meta.get('Keywords', [])
+        for keyword in keywords[:5]:  # Top 5 keywords
+            topics.append((keyword.lower(), 0.4))
+    
+    # Extract from raw detections
+    if image_meta.raw_detections:
+        raw_meta = image_meta.raw_detections
+        
+        # Objects as topics
+        objects = raw_meta.get('objects', [])
+        for obj in objects[:3]:  # Top 3 objects
+            topics.append((obj.lower(), 0.7))
+        
+        # Colors as topics
+        colors = raw_meta.get('colors_named', [])
+        for color in colors[:2]:  # Top 2 colors
+            topics.append((color.lower(), 0.5))
+    
+    return topics
+
+def _get_or_create_topic(session, topic_name: str) -> str:
+    """Get existing topic or create new one"""
+    from .db import Topic
+    
+    # Check database
+    existing_topic = session.session.query(Topic).filter(
+        Topic.topic_id == topic_name
+    ).first()
+    
+    if existing_topic:
+        return existing_topic.topic_id
+    
+    # Create new topic
+    topic = session.create_topic(
+        topic_id=topic_name,
+        name=topic_name.title(),
+        description=f"Topic: {topic_name}"
+    )
+    
+    return topic.topic_id
