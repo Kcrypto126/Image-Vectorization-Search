@@ -24,3 +24,8 @@ ultralytics
 layoutparser
 pytesseract
 openai
+torch-geometric
+networkx
+scikit-learn
+numpy
+scipy

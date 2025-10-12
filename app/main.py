@@ -1,6 +1,7 @@
 # app/main.py
 import os
 import logging
+from typing import List
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -9,11 +10,12 @@ from starlette.responses import Response
 from .vectorizer import Vectorizer
 from .index_adapter import IndexAdapter
 from .db import get_session, init_db, ImageMetadata, Interaction
-from .schemas import SearchResultSchema
+from .schemas import SearchResultSchema, UserTasteProfile, BoardSchema, PinBoardSchema, TasteGraphStatus
 from .storage import save_image
 from .tasks import full_reindex, ingest_local_images, ingest_online_images, rebuild_taste_graph
 from .db import ImageMetadata
 from .metadata import extract_image_metadata, detect_filters_from_text
+from .taste_graph import initialize_taste_graph_system, get_taste_graph_manager
 import tempfile
 import uuid
 from dotenv import load_dotenv
@@ -51,6 +53,15 @@ init_db(os.getenv("DATABASE_URL"))
 
 vectorizer = Vectorizer(model_name=MODEL_NAME, device=os.getenv("DEVICE", "cpu"))
 index = IndexAdapter(backend=INDEX_BACKEND, dim=DIM)
+
+# Initialize taste graph system
+taste_graph_manager = None
+try:
+    taste_graph_manager = initialize_taste_graph_system(get_session(), vectorizer)
+    logger.info("Taste graph system initialized successfully")
+except Exception as e:
+    logger.warning(f"Failed to initialize taste graph system: {e}")
+    taste_graph_manager = None
 
 @app.on_event("startup")
 async def on_startup():
@@ -199,7 +210,7 @@ async def search(
             continue
         
         # Get all metadata
-        extra = meta.extra_metadata or {}
+        extra = meta.image_metadata or {}
         raw = meta.raw_detections or {}
         generated = meta.generated_metadata or {}
         
@@ -362,6 +373,18 @@ async def search(
 
     # Sort by updated score desc and trim to top_k
     filtered.sort(key=lambda x: x["score"], reverse=True)
+    
+    # Apply taste graph personalization if user_id provided and taste graph is available
+    if user_id and taste_graph_manager:
+        try:
+            personalized_results = taste_graph_manager.get_personalized_search_results(
+                user_id, filtered, top_k
+            )
+            return {"results": personalized_results}
+        except Exception as e:
+            logger.warning(f"Taste graph personalization failed: {e}")
+            # Fall back to regular results
+    
     return {"results": filtered[:top_k]}
 
 
@@ -454,6 +477,93 @@ async def upload_image(file: UploadFile = File(...)):
         except Exception:
             logger.warning(f"Failed to remove temp file: {tmp_path}")
 
+# Taste Graph Management Endpoints
+
+@app.post("/taste-graph/users/{user_id}/initialize")
+async def initialize_user_taste(user_id: str):
+    """Initialize a new user in the taste graph system"""
+    if not taste_graph_manager:
+        raise HTTPException(status_code=503, detail="Taste graph system not available")
+    
+    try:
+        result = taste_graph_manager.initialize_user(user_id)
+        return result
+    except Exception as e:
+        logger.exception("Failed to initialize user taste")
+        raise HTTPException(status_code=500, detail="Failed to initialize user taste")
+
+@app.get("/taste-graph/users/{user_id}/profile", response_model=UserTasteProfile)
+async def get_user_taste_profile(user_id: str):
+    """Get user's taste profile"""
+    if not taste_graph_manager:
+        raise HTTPException(status_code=503, detail="Taste graph system not available")
+    
+    try:
+        profile = taste_graph_manager.get_user_taste_profile(user_id)
+        return profile
+    except Exception as e:
+        logger.exception("Failed to get user taste profile")
+        raise HTTPException(status_code=500, detail="Failed to get user taste profile")
+
+@app.post("/taste-graph/boards", response_model=BoardSchema)
+async def create_board(
+    user_id: str = Query(..., description="User id"),
+    board_id: str = Query(..., description="Board id"),
+    name: str = Query(..., description="Board name"),
+    description: str = Query(None, description="Board description")
+):
+    """Create a new board"""
+    if not taste_graph_manager:
+        raise HTTPException(status_code=503, detail="Taste graph system not available")
+    
+    try:
+        result = taste_graph_manager.create_board(user_id, board_id, name, description)
+        return result
+    except Exception as e:
+        logger.exception("Failed to create board")
+        raise HTTPException(status_code=500, detail="Failed to create board")
+
+@app.post("/taste-graph/boards/{board_id}/pins/{pin_id}", response_model=PinBoardSchema)
+async def add_pin_to_board(board_id: str, pin_id: str):
+    """Add a pin to a board"""
+    if not taste_graph_manager:
+        raise HTTPException(status_code=503, detail="Taste graph system not available")
+    
+    try:
+        result = taste_graph_manager.add_pin_to_board(pin_id, board_id)
+        return result
+    except Exception as e:
+        logger.exception("Failed to add pin to board")
+        raise HTTPException(status_code=500, detail="Failed to add pin to board")
+
+@app.post("/admin/taste-graph/train")
+async def train_taste_graph(
+    background_tasks: BackgroundTasks,
+    epochs: int = Query(10, ge=1, le=100, description="Number of training epochs"),
+    user_ids: str = Query(None, description="Comma-separated user IDs to train on (optional)")
+):
+    """Run offline PinSage training"""
+    if not taste_graph_manager:
+        raise HTTPException(status_code=503, detail="Taste graph system not available")
+    
+    user_list = None
+    if user_ids:
+        user_list = [uid.strip() for uid in user_ids.split(",")]
+    
+    background_tasks.add_task(train_taste_graph_task, epochs, user_list)
+    logger.info("Taste graph training started...")
+    return {"status": "training started", "epochs": epochs}
+
+@app.post("/admin/taste-graph/rebuild")
+async def rebuild_taste_graph_endpoint(background_tasks: BackgroundTasks):
+    """Rebuild the taste graph from scratch"""
+    if not taste_graph_manager:
+        raise HTTPException(status_code=503, detail="Taste graph system not available")
+    
+    background_tasks.add_task(rebuild_taste_graph_task)
+    logger.info("Taste graph rebuild started...")
+    return {"status": "rebuild started"}
+
 @app.post("/events")
 async def record_event(
     user_id: str = Query(..., description="User id"),
@@ -473,7 +583,39 @@ async def record_event(
     try:
         session = get_session()
         session.record_interaction(user_id=user_id, image_id=image_id, event=event, weight=weight)
+        
+        # Process interaction through taste graph system
+        if taste_graph_manager:
+            try:
+                taste_graph_manager.process_user_interaction(user_id, image_id, event, weight)
+            except Exception as e:
+                logger.warning(f"Taste graph processing failed: {e}")
+        
         return {"status": "ok"}
     except Exception as e:
         logger.exception("Failed to record event")
         raise HTTPException(status_code=500, detail="Failed to record event")
+
+# Background task functions for taste graph
+
+async def train_taste_graph_task(epochs: int, user_ids: List[str] = None):
+    """Background task for offline PinSage training"""
+    try:
+        if taste_graph_manager:
+            result = taste_graph_manager.run_offline_training(user_ids, epochs)
+            logger.info(f"Taste graph training completed: {result}")
+        else:
+            logger.error("Taste graph manager not available for training")
+    except Exception as e:
+        logger.exception(f"Taste graph training failed: {e}")
+
+async def rebuild_taste_graph_task():
+    """Background task for rebuilding taste graph"""
+    try:
+        if taste_graph_manager:
+            result = taste_graph_manager.rebuild_taste_graph()
+            logger.info(f"Taste graph rebuild completed: {result}")
+        else:
+            logger.error("Taste graph manager not available for rebuild")
+    except Exception as e:
+        logger.exception(f"Taste graph rebuild failed: {e}")
