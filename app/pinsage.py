@@ -10,6 +10,8 @@ import logging
 from datetime import datetime, timedelta
 import math
 
+from app.db import ImageMetadata, Interaction, ItemCooccurrence, PinTopic, Topic, User, UserTopic
+
 logger = logging.getLogger(__name__)
 
 class PinSageLayer(nn.Module):
@@ -113,9 +115,10 @@ class TasteGraphBuilder:
     """
     Builds and manages the taste graph structure for PinSage training.
     """
-    def __init__(self, session, vectorizer):
+    def __init__(self, session, vectorizer, index_adapter=None):
         self.session = session
         self.vectorizer = vectorizer
+        self.index_adapter = index_adapter
         self.graph = nx.MultiDiGraph()
         self.node_features = {}
         self.edge_weights = {}
@@ -175,8 +178,17 @@ class TasteGraphBuilder:
             node_id = f"pin_{img.id}"
             self.graph.add_node(node_id, type='pin', image_id=img.id)
             
-            # Get image vector from index or compute
-            # For now, use random initialization - in production, load from index
+            # Get exact image vector from index if available
+            if self.index_adapter:
+                try:
+                    image_vector = self.vectorizer.get_vector(img.id, self.index_adapter)
+                    if image_vector is not None:
+                        self.node_features[node_id] = image_vector
+                        continue
+                except Exception as e:
+                    logger.warning(f"Failed to get vector for image {img.id}: {e}")
+            
+            # Fallback to random initialization if index not available or vector not found
             self.node_features[node_id] = np.random.normal(0, 0.1, 512)
     
     def _add_topic_nodes(self):
@@ -473,9 +485,10 @@ class RealTimeTasteUpdater:
     """
     Real-time taste vector updater for immediate user preference changes.
     """
-    def __init__(self, session, vectorizer, learning_rate: float = 0.1):
+    def __init__(self, session, vectorizer, index_adapter=None, learning_rate: float = 0.1):
         self.session = session
         self.vectorizer = vectorizer
+        self.index_adapter = index_adapter
         self.learning_rate = learning_rate
         
     def update_user_taste_on_interaction(self, user_id: str, image_id: str, 
@@ -490,9 +503,17 @@ class RealTimeTasteUpdater:
             # Initialize user taste vector
             current_taste = np.random.normal(0, 0.1, 512)
         
-        # Get image vector (this would ideally come from the index)
-        # For now, we'll use a placeholder - in production, load from FAISS index
-        image_vector = np.random.normal(0, 0.1, 512)
+        # Get exact image vector from index if available
+        image_vector = None
+        if self.index_adapter:
+            try:
+                image_vector = self.vectorizer.get_vector(image_id, self.index_adapter)
+            except Exception as e:
+                logger.warning(f"Failed to get vector for image {image_id}: {e}")
+        
+        if image_vector is None:
+            # Fallback to random vector if not found in index
+            image_vector = np.random.normal(0, 0.1, 512)
         
         # Compute interaction strength
         interaction_strength = self._get_interaction_strength(event, weight)
@@ -539,14 +560,14 @@ class RealTimeTasteUpdater:
                 user_id, pin_topic.topic_id, affinity_delta, event
             )
 
-def initialize_taste_graph(session, vectorizer):
+def initialize_taste_graph(session, vectorizer, index_adapter=None):
     """
     Initialize the taste graph system.
     """
     logger.info("Initializing taste graph system...")
     
     # Create graph builder
-    graph_builder = TasteGraphBuilder(session, vectorizer)
+    graph_builder = TasteGraphBuilder(session, vectorizer, index_adapter)
     
     # Build initial graph
     graph_builder.build_graph()
@@ -563,7 +584,7 @@ def initialize_taste_graph(session, vectorizer):
     trainer = PinSageTrainer(model, graph_builder)
     
     # Create real-time updater
-    realtime_updater = RealTimeTasteUpdater(session, vectorizer)
+    realtime_updater = RealTimeTasteUpdater(session, vectorizer, index_adapter)
     
     return {
         'graph_builder': graph_builder,

@@ -57,7 +57,7 @@ index = IndexAdapter(backend=INDEX_BACKEND, dim=DIM)
 # Initialize taste graph system
 taste_graph_manager = None
 try:
-    taste_graph_manager = initialize_taste_graph_system(get_session(), vectorizer)
+    taste_graph_manager = initialize_taste_graph_system(get_session(), vectorizer, index)
     logger.info("Taste graph system initialized successfully")
 except Exception as e:
     logger.warning(f"Failed to initialize taste graph system: {e}")
@@ -359,8 +359,8 @@ async def search(
             bonus += 0.15
         
         # Personalized boost
-        if user_id and r["id"] in user_boosts:
-            bonus += min(0.5, 0.05 + 0.1 * (user_boosts[r["id"]] ** 0.5))
+        # if user_id and r["id"] in user_boosts:
+        #     bonus += min(0.5, 0.05 + 0.1 * (user_boosts[r["id"]] ** 0.5))
 
         score += bonus
 
@@ -581,8 +581,8 @@ async def record_event(
     }
     weight = event_weights.get(event, 1.0)
     try:
-        session = get_session()
-        session.record_interaction(user_id=user_id, image_id=image_id, event=event, weight=weight)
+        # session = get_session()
+        # session.record_interaction(user_id=user_id, image_id=image_id, event=event, weight=weight)
         
         # Process interaction through taste graph system
         if taste_graph_manager:
