@@ -11,7 +11,7 @@ def test_database_import():
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'app'))
         
         print("Testing database import...")
-        from db import init_db, get_session, ImageMetadata, User, Board, Topic, TasteGraphEdge
+        from db import init_db, get_session, ImageMetadata, User, Board, Topic, TasteGraphEdge  # pyright: ignore[reportMissingImports]
         print("✅ All database imports successful!")
         
         print("Testing database initialization...")

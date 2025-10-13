@@ -12,12 +12,12 @@ def test_imports():
     
     modules_to_test = [
         ("db", "from db import init_db, get_session, ImageMetadata"),
-        ("main", "from main import app"),
-        ("tasks", "from tasks import train_pinsage_model"),
-        ("taste_graph", "from taste_graph import TasteGraphManager"),
-        ("pinsage", "from pinsage import PinSageModel"),
-        ("schemas", "from schemas import SearchResultSchema"),
-        ("metadata", "from metadata import extract_image_metadata"),
+        ("main", "from app.main import app"),
+        ("tasks", "from app.tasks import train_pinsage_model"),
+        ("taste_graph", "from app.taste_graph import TasteGraphManager"),
+        ("pinsage", "from app.pinsage import PinSageModel"),
+        ("schemas", "from app.schemas import SearchResultSchema"),
+        ("metadata", "from app.metadata import extract_image_metadata"),
     ]
     
     for module_name, import_stmt in modules_to_test:

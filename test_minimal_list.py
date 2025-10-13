@@ -20,7 +20,7 @@ def test_minimal_imports():
     
     print("Testing tasks.py import...")
     try:
-        from tasks import train_pinsage_model
+        from tasks import train_pinsage_model  # pyright: ignore[reportMissingImports]
         print("✅ train_pinsage_model imported successfully")
     except NameError as e:
         if "List" in str(e):
