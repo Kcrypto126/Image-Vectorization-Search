@@ -35,7 +35,7 @@ def test_minimal_imports():
     
     print("Testing main.py import...")
     try:
-        from main import app
+        from main import app  # pyright: ignore[reportMissingImports]
         print("✅ main.py imported successfully")
     except NameError as e:
         if "List" in str(e):
