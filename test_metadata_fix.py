@@ -13,7 +13,7 @@ def test_imports():
     """Test all database imports"""
     print("Testing database imports...")
     try:
-        from db import (
+        from db import (  # pyright: ignore[reportMissingImports]
             init_db, get_session, ImageMetadata, Interaction, User, Board, Topic, 
             PinBoard, PinTopic, UserTopic, TasteGraphEdge, ItemCooccurrence
         )
@@ -27,7 +27,7 @@ def test_database_init():
     """Test database initialization"""
     print("Testing database initialization...")
     try:
-        from db import init_db
+        from db import init_db  # pyright: ignore[reportMissingImports]
         init_db("sqlite:///test_metadata.db")
         print("✅ Database initialization successful!")
         return True
@@ -39,7 +39,7 @@ def test_model_creation():
     """Test model creation"""
     print("Testing model creation...")
     try:
-        from db import get_session, ImageMetadata, User, Board, Topic, TasteGraphEdge
+        from db import get_session, ImageMetadata, User, Board, Topic, TasteGraphEdge  # pyright: ignore[reportMissingImports]
         
         session = get_session()
         
@@ -81,7 +81,7 @@ def test_session_operations():
     """Test session operations"""
     print("Testing session operations...")
     try:
-        from db import get_session, User
+        from db import get_session, User  # pyright: ignore[reportMissingImports]
         
         session = get_session()
         
