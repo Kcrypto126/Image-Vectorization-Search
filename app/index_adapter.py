@@ -70,4 +70,26 @@ class IndexAdapter:
                 "score": float(distances[0][rank])
             })
         return results
+    
+    def get_vector_by_id(self, image_id: str) -> np.ndarray:
+        """
+        Get exact vector by image ID from the FAISS index.
+        Returns None if image_id not found.
+        """
+        try:
+            # Find the index of the image_id in our ids list
+            if image_id not in self.ids:
+                return None
+            
+            idx = self.ids.index(image_id)
+            
+            # Reconstruct the vector from the FAISS index
+            # FAISS doesn't have a direct method to get by index, so we need to reconstruct
+            # Get all vectors and return the one at the specific index
+            vectors = self.index.reconstruct_batch([idx])
+            return vectors[0] if len(vectors) > 0 else None
+            
+        except Exception as e:
+            logger.warning(f"Failed to get vector for image_id {image_id}: {e}")
+            return None
 

@@ -5,6 +5,8 @@ from typing import Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
 import json
 
+from app.db import Board, PinTopic, Topic, User
+
 logger = logging.getLogger(__name__)
 
 class TasteGraphManager:
@@ -13,10 +15,11 @@ class TasteGraphManager:
     Coordinates between PinSage training, real-time updates, and search personalization.
     """
     
-    def __init__(self, session, vectorizer, pinsage_system=None):
+    def __init__(self, session, vectorizer, pinsage_system=None, index_adapter=None):
         self.session = session
         self.vectorizer = vectorizer
         self.pinsage_system = pinsage_system
+        self.index_adapter = index_adapter
         self.topic_cache = {}
         self.user_cache = {}
         
@@ -241,10 +244,18 @@ class TasteGraphManager:
         """
         Calculate bonus score based on taste vector similarity.
         """
-        # In production, this would get the actual image vector from the index
-        # For now, we'll use a placeholder
-        image_vector = np.random.normal(0, 0.1, 512)
-        image_vector = image_vector / (np.linalg.norm(image_vector) + 1e-8)
+        # Get exact image vector from index if available
+        image_vector = None
+        if self.index_adapter:
+            try:
+                image_vector = self.vectorizer.get_vector(image_id, self.index_adapter)
+            except Exception as e:
+                logger.warning(f"Failed to get vector for image {image_id}: {e}")
+        
+        if image_vector is None:
+            # Fallback to random vector if not found in index
+            image_vector = np.random.normal(0, 0.1, 512)
+            image_vector = image_vector / (np.linalg.norm(image_vector) + 1e-8)
         
         # Calculate cosine similarity
         similarity = np.dot(user_taste, image_vector)
@@ -398,7 +409,7 @@ def get_taste_graph_manager(session=None, vectorizer=None, pinsage_system=None):
     
     return _taste_graph_manager
 
-def initialize_taste_graph_system(session, vectorizer):
+def initialize_taste_graph_system(session, vectorizer, index_adapter=None):
     """
     Initialize the complete taste graph system.
     """
@@ -407,10 +418,10 @@ def initialize_taste_graph_system(session, vectorizer):
     logger.info("Initializing complete taste graph system...")
     
     # Initialize PinSage system
-    pinsage_system = initialize_taste_graph(session, vectorizer)
+    pinsage_system = initialize_taste_graph(session, vectorizer, index_adapter)
     
     # Initialize taste graph manager
-    taste_graph_manager = TasteGraphManager(session, vectorizer, pinsage_system)
+    taste_graph_manager = TasteGraphManager(session, vectorizer, pinsage_system, index_adapter)
     
     # Set global instance
     global _taste_graph_manager

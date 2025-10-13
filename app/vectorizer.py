@@ -44,3 +44,20 @@ class Vectorizer:
             return image_vector
         else:
             raise ValueError("At least one vector (text or image) must be provided")
+    
+    def get_vector(self, image_id: str, index_adapter=None) -> np.ndarray:
+        """
+        Get exact image vector by ID from the existing index.
+        This method requires an IndexAdapter instance to access the stored vectors.
+        
+        Args:
+            image_id: The ID of the image to get the vector for
+            index_adapter: IndexAdapter instance to access the index
+            
+        Returns:
+            numpy array of the image vector, or None if not found
+        """
+        if index_adapter is None:
+            raise ValueError("index_adapter is required to get vectors by ID")
+        
+        return index_adapter.get_vector_by_id(image_id)
