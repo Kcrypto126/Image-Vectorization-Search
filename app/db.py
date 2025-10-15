@@ -5,7 +5,10 @@ from datetime import datetime
 import os
 import uuid
 import numpy as np
+import logging
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -67,6 +70,12 @@ class Board(Base):
     name = Column(String, nullable=True)
     description = Column(Text, nullable=True)
     board_vector = Column(JSON, nullable=True)  # Board's aggregated embedding
+    board_type = Column(String, nullable=False, default='user')  # 'user' or 'auto'
+    is_active = Column(Boolean, default=True)  # For auto-boards that can be merged/split
+    cluster_center = Column(JSON, nullable=True)  # For auto-boards: original cluster center
+    cluster_radius = Column(Float, nullable=True)  # For auto-boards: cluster radius
+    pin_count = Column(Integer, default=0)  # Cached pin count for performance
+    last_activity = Column(DateTime, default=datetime.utcnow)  # Last time board was updated
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -111,6 +120,42 @@ class UserTopic(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 Index('ix_user_topic', UserTopic.user_id, UserTopic.topic_id, unique=True)
+
+class UserCorrelation(Base):
+    __tablename__ = "user_correlations"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_a = Column(String, nullable=False, index=True)
+    user_b = Column(String, nullable=False, index=True)
+    similarity_score = Column(Float, nullable=False)  # Taste similarity between users
+    interaction_overlap = Column(Float, default=0.0)  # Overlap in interacted content
+    last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+Index('ix_user_correlation', UserCorrelation.user_a, UserCorrelation.user_b, unique=True)
+
+class PinCorrelation(Base):
+    __tablename__ = "pin_correlations"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    pin_a = Column(String, nullable=False, index=True)
+    pin_b = Column(String, nullable=False, index=True)
+    similarity_score = Column(Float, nullable=False)  # Vector similarity
+    cooccurrence_score = Column(Float, default=0.0)  # How often they appear together
+    behavioral_score = Column(Float, default=0.0)  # How often users interact with both
+    last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+Index('ix_pin_correlation', PinCorrelation.pin_a, PinCorrelation.pin_b, unique=True)
+
+class BoardEvolution(Base):
+    __tablename__ = "board_evolution"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    board_id = Column(String, nullable=False, index=True)
+    evolution_type = Column(String, nullable=False)  # 'created', 'merged', 'split', 'updated'
+    previous_board_ids = Column(JSON, nullable=True)  # For merge/split operations
+    new_board_ids = Column(JSON, nullable=True)  # For split operations
+    reason = Column(Text, nullable=True)  # Human-readable reason
+    evolution_data = Column(JSON, nullable=True)  # Additional evolution data (renamed from metadata)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class TasteGraphEdge(Base):
     __tablename__ = "taste_graph_edges"
@@ -161,6 +206,112 @@ def init_db(database_url: str = None):
                     conn.execute(text("ALTER TABLE images ADD COLUMN generated_metadata JSON"))
                 except Exception:
                     pass
+        
+        # Migrate boards table for new auto-board features
+        try:
+            board_cols = {c['name'] for c in inspector.get_columns('boards')}
+            with engine.begin() as conn:
+                # Add new columns for auto-board functionality
+                if 'board_type' not in board_cols:
+                    try:
+                        conn.execute(text("ALTER TABLE boards ADD COLUMN board_type VARCHAR DEFAULT 'user'"))
+                    except Exception:
+                        pass
+                
+                if 'is_active' not in board_cols:
+                    try:
+                        conn.execute(text("ALTER TABLE boards ADD COLUMN is_active BOOLEAN DEFAULT true"))
+                    except Exception:
+                        pass
+                
+                if 'cluster_center' not in board_cols:
+                    try:
+                        conn.execute(text("ALTER TABLE boards ADD COLUMN cluster_center JSON"))
+                    except Exception:
+                        pass
+                
+                if 'cluster_radius' not in board_cols:
+                    try:
+                        conn.execute(text("ALTER TABLE boards ADD COLUMN cluster_radius FLOAT"))
+                    except Exception:
+                        pass
+                
+                if 'pin_count' not in board_cols:
+                    try:
+                        conn.execute(text("ALTER TABLE boards ADD COLUMN pin_count INTEGER DEFAULT 0"))
+                    except Exception:
+                        pass
+                
+                if 'last_activity' not in board_cols:
+                    try:
+                        conn.execute(text("ALTER TABLE boards ADD COLUMN last_activity TIMESTAMP"))
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning(f"Failed to migrate boards table: {e}")
+        
+        # Create new tables for correlations and board evolution
+        try:
+            # Check if new tables exist, if not create them
+            existing_tables = inspector.get_table_names()
+            
+            with engine.begin() as conn:
+                if 'user_correlations' not in existing_tables:
+                    try:
+                        conn.execute(text("""
+                            CREATE TABLE user_correlations (
+                                id SERIAL PRIMARY KEY,
+                                user_a VARCHAR NOT NULL,
+                                user_b VARCHAR NOT NULL,
+                                similarity_score FLOAT NOT NULL,
+                                interaction_overlap FLOAT DEFAULT 0.0,
+                                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            )
+                        """))
+                        conn.execute(text("CREATE INDEX ix_user_correlation ON user_correlations (user_a, user_b)"))
+                    except Exception as e:
+                        logger.warning(f"Failed to create user_correlations table: {e}")
+                
+                if 'pin_correlations' not in existing_tables:
+                    try:
+                        conn.execute(text("""
+                            CREATE TABLE pin_correlations (
+                                id SERIAL PRIMARY KEY,
+                                pin_a VARCHAR NOT NULL,
+                                pin_b VARCHAR NOT NULL,
+                                similarity_score FLOAT NOT NULL,
+                                cooccurrence_score FLOAT DEFAULT 0.0,
+                                behavioral_score FLOAT DEFAULT 0.0,
+                                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            )
+                        """))
+                        conn.execute(text("CREATE INDEX ix_pin_correlation ON pin_correlations (pin_a, pin_b)"))
+                    except Exception as e:
+                        logger.warning(f"Failed to create pin_correlations table: {e}")
+                
+                if 'board_evolution' not in existing_tables:
+                    try:
+                        conn.execute(text("""
+                            CREATE TABLE board_evolution (
+                                id SERIAL PRIMARY KEY,
+                                board_id VARCHAR NOT NULL,
+                                evolution_type VARCHAR NOT NULL,
+                                previous_board_ids JSON,
+                                new_board_ids JSON,
+                                reason TEXT,
+                                evolution_data JSON,
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            )
+                        """))
+                        conn.execute(text("CREATE INDEX ix_board_evolution ON board_evolution (board_id)"))
+                    except Exception as e:
+                        logger.warning(f"Failed to create board_evolution table: {e}")
+                    
+        except Exception as e:
+            logger.warning(f"Failed to create new tables: {e}")
+            
     except Exception:
         # Best-effort; ignore migration errors in lightweight setup
         pass
@@ -183,6 +334,10 @@ class DBSession:
 
     def get_image_metadata(self, id_):
         return self.session.get(ImageMetadata, id_)
+    
+    def get_all_images(self):
+        """Get all images from the database"""
+        return self.session.query(ImageMetadata).all()
 
     # Taste graph helpers
     def record_interaction(self, user_id: str, image_id: str, event: str, weight: float):
@@ -249,12 +404,68 @@ class DBSession:
             return np.array(user.taste_vector)
         return None
 
-    def create_board(self, board_id: str, user_id: str, name: str = None, description: str = None):
+    def create_board(self, board_id: str, user_id: str, name: str = None, description: str = None, 
+                    board_type: str = 'user', board_vector: np.ndarray = None):
         """Create a new board"""
-        board = Board(board_id=board_id, user_id=user_id, name=name, description=description)
+        board = Board(
+            board_id=board_id, 
+            user_id=user_id, 
+            name=name, 
+            description=description,
+            board_type=board_type,
+            board_vector=board_vector.tolist() if board_vector is not None else None
+        )
         self.session.add(board)
         self.session.commit()
         return board
+    
+    def create_auto_board(self, user_id: str, name: str, description: str, 
+                         board_vector: np.ndarray, cluster_center: np.ndarray, 
+                         cluster_radius: float = None) -> str:
+        """Create an auto-generated board"""
+        board_id = f"auto_{user_id}_{uuid.uuid4().hex[:8]}"
+        board = Board(
+            board_id=board_id,
+            user_id=user_id,
+            name=name,
+            description=description,
+            board_type='auto',
+            board_vector=board_vector.tolist(),
+            cluster_center=cluster_center.tolist(),
+            cluster_radius=cluster_radius
+        )
+        self.session.add(board)
+        self.session.commit()
+        return board_id
+    
+    def update_board_vector(self, board_id: str, board_vector: np.ndarray):
+        """Update board's vector representation"""
+        board = self.session.query(Board).filter(Board.board_id == board_id).first()
+        if board:
+            board.board_vector = board_vector.tolist()
+            board.last_activity = datetime.utcnow()
+            self.session.commit()
+        return board
+    
+    def get_user_boards(self, user_id: str, board_type: str = None, active_only: bool = True):
+        """Get user's boards, optionally filtered by type"""
+        query = self.session.query(Board).filter(Board.user_id == user_id)
+        if board_type:
+            query = query.filter(Board.board_type == board_type)
+        if active_only:
+            query = query.filter(Board.is_active == True)
+        return query.all()
+    
+    def get_board_pins(self, board_id: str):
+        """Get all pins in a board"""
+        return self.session.query(PinBoard).filter(PinBoard.board_id == board_id).all()
+    
+    def get_board_vector(self, board_id: str):
+        """Get board's vector representation"""
+        board = self.session.query(Board).filter(Board.board_id == board_id).first()
+        if board and board.board_vector:
+            return np.array(board.board_vector)
+        return None
 
     def add_pin_to_board(self, pin_id: str, board_id: str):
         """Add a pin to a board"""
@@ -355,6 +566,173 @@ class DBSession:
             Interaction.user_id == user_id
         ).order_by(Interaction.created_at.desc()).limit(limit).all()
         return interactions
+    
+    # User correlation methods
+    def update_user_correlation(self, user_a: str, user_b: str, similarity_score: float, 
+                               interaction_overlap: float = 0.0):
+        """Update correlation between two users"""
+        correlation = self.session.query(UserCorrelation).filter(
+            ((UserCorrelation.user_a == user_a) & (UserCorrelation.user_b == user_b)) |
+            ((UserCorrelation.user_a == user_b) & (UserCorrelation.user_b == user_a))
+        ).first()
+        
+        if correlation:
+            correlation.similarity_score = similarity_score
+            correlation.interaction_overlap = interaction_overlap
+            correlation.last_updated = datetime.utcnow()
+        else:
+            correlation = UserCorrelation(
+                user_a=user_a, user_b=user_b, 
+                similarity_score=similarity_score, 
+                interaction_overlap=interaction_overlap
+            )
+            self.session.add(correlation)
+        self.session.commit()
+        return correlation
+    
+    def get_similar_users(self, user_id: str, top_k: int = 20):
+        """Get users similar to the given user"""
+        correlations = self.session.query(UserCorrelation).filter(
+            (UserCorrelation.user_a == user_id) | (UserCorrelation.user_b == user_id)
+        ).order_by(UserCorrelation.similarity_score.desc()).limit(top_k).all()
+        
+        similar_users = []
+        for corr in correlations:
+            other_user = corr.user_b if corr.user_a == user_id else corr.user_a
+            similar_users.append((other_user, corr.similarity_score, corr.interaction_overlap))
+        return similar_users
+    
+    # Pin correlation methods
+    def update_pin_correlation(self, pin_a: str, pin_b: str, similarity_score: float,
+                              cooccurrence_score: float = 0.0, behavioral_score: float = 0.0):
+        """Update correlation between two pins"""
+        correlation = self.session.query(PinCorrelation).filter(
+            ((PinCorrelation.pin_a == pin_a) & (PinCorrelation.pin_b == pin_b)) |
+            ((PinCorrelation.pin_a == pin_b) & (PinCorrelation.pin_b == pin_a))
+        ).first()
+        
+        if correlation:
+            correlation.similarity_score = similarity_score
+            correlation.cooccurrence_score = cooccurrence_score
+            correlation.behavioral_score = behavioral_score
+            correlation.last_updated = datetime.utcnow()
+        else:
+            correlation = PinCorrelation(
+                pin_a=pin_a, pin_b=pin_b,
+                similarity_score=similarity_score,
+                cooccurrence_score=cooccurrence_score,
+                behavioral_score=behavioral_score
+            )
+            self.session.add(correlation)
+        self.session.commit()
+        return correlation
+    
+    def get_similar_pins(self, pin_id: str, top_k: int = 50):
+        """Get pins similar to the given pin"""
+        correlations = self.session.query(PinCorrelation).filter(
+            (PinCorrelation.pin_a == pin_id) | (PinCorrelation.pin_b == pin_id)
+        ).order_by(PinCorrelation.similarity_score.desc()).limit(top_k).all()
+        
+        similar_pins = []
+        for corr in correlations:
+            other_pin = corr.pin_b if corr.pin_a == pin_id else corr.pin_a
+            similar_pins.append((other_pin, corr.similarity_score, corr.cooccurrence_score, corr.behavioral_score))
+        return similar_pins
+    
+    # Board evolution tracking
+    def track_board_evolution(self, board_id: str, evolution_type: str, 
+                             previous_board_ids: list = None, new_board_ids: list = None,
+                             reason: str = None, evolution_data: dict = None):
+        """Track board evolution events"""
+        evolution = BoardEvolution(
+            board_id=board_id,
+            evolution_type=evolution_type,
+            previous_board_ids=previous_board_ids,
+            new_board_ids=new_board_ids,
+            reason=reason,
+            evolution_data=evolution_data
+        )
+        self.session.add(evolution)
+        self.session.commit()
+        return evolution
 
 def get_session():
     return DBSession()
+
+def force_migration():
+    """
+    Force database migration to add new columns and tables.
+    This can be called manually if automatic migration fails.
+    """
+    try:
+        inspector = inspect(engine)
+        
+        # Migrate boards table
+        board_cols = {c['name'] for c in inspector.get_columns('boards')}
+        with engine.begin() as conn:
+            if 'board_type' not in board_cols:
+                conn.execute(text("ALTER TABLE boards ADD COLUMN board_type VARCHAR DEFAULT 'user'"))
+            if 'is_active' not in board_cols:
+                conn.execute(text("ALTER TABLE boards ADD COLUMN is_active BOOLEAN DEFAULT true"))
+            if 'cluster_center' not in board_cols:
+                conn.execute(text("ALTER TABLE boards ADD COLUMN cluster_center JSON"))
+            if 'cluster_radius' not in board_cols:
+                conn.execute(text("ALTER TABLE boards ADD COLUMN cluster_radius FLOAT"))
+            if 'pin_count' not in board_cols:
+                conn.execute(text("ALTER TABLE boards ADD COLUMN pin_count INTEGER DEFAULT 0"))
+            if 'last_activity' not in board_cols:
+                conn.execute(text("ALTER TABLE boards ADD COLUMN last_activity TIMESTAMP"))
+        
+        # Create new tables
+        existing_tables = inspector.get_table_names()
+        with engine.begin() as conn:
+            if 'user_correlations' not in existing_tables:
+                conn.execute(text("""
+                    CREATE TABLE user_correlations (
+                        id SERIAL PRIMARY KEY,
+                        user_a VARCHAR NOT NULL,
+                        user_b VARCHAR NOT NULL,
+                        similarity_score FLOAT NOT NULL,
+                        interaction_overlap FLOAT DEFAULT 0.0,
+                        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                conn.execute(text("CREATE INDEX ix_user_correlation ON user_correlations (user_a, user_b)"))
+            
+            if 'pin_correlations' not in existing_tables:
+                conn.execute(text("""
+                    CREATE TABLE pin_correlations (
+                        id SERIAL PRIMARY KEY,
+                        pin_a VARCHAR NOT NULL,
+                        pin_b VARCHAR NOT NULL,
+                        similarity_score FLOAT NOT NULL,
+                        cooccurrence_score FLOAT DEFAULT 0.0,
+                        behavioral_score FLOAT DEFAULT 0.0,
+                        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                conn.execute(text("CREATE INDEX ix_pin_correlation ON pin_correlations (pin_a, pin_b)"))
+            
+            if 'board_evolution' not in existing_tables:
+                conn.execute(text("""
+                    CREATE TABLE board_evolution (
+                        id SERIAL PRIMARY KEY,
+                        board_id VARCHAR NOT NULL,
+                        evolution_type VARCHAR NOT NULL,
+                        previous_board_ids JSON,
+                        new_board_ids JSON,
+                        reason TEXT,
+                        evolution_data JSON,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                conn.execute(text("CREATE INDEX ix_board_evolution ON board_evolution (board_id)"))
+        
+        logger.info("Database migration completed successfully")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Database migration failed: {e}")
+        return False

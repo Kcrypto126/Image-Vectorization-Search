@@ -7,12 +7,22 @@ class ResultItem(BaseModel):
     id: str
     content_type: Optional[str]
     image_url: Optional[str]
+    url: Optional[str]  # Alternative field name for compatibility
     score: float
     taste_bonus: Optional[float] = None
     topic_bonus: Optional[float] = None
+    board_bonus: Optional[float] = None
+    collaborative_bonus: Optional[float] = None
+    behavioral_bonus: Optional[float] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 class SearchResultSchema(BaseModel):
     results: List[ResultItem]
+    total: Optional[int] = None
+    query: Optional[str] = None
+    user_id: Optional[str] = None
+    personalized: Optional[bool] = None
+    error: Optional[str] = None
 
 class UserTasteProfile(BaseModel):
     user_id: str
@@ -27,12 +37,28 @@ class BoardSchema(BaseModel):
     user_id: str
     name: str
     description: Optional[str]
+    board_type: str = "user"  # "user" or "auto"
+    pin_count: int = 0
+    created_at: Optional[str] = None
+    last_activity: Optional[str] = None
     status: str
 
 class PinBoardSchema(BaseModel):
     pin_id: str
     board_id: str
     status: str
+
+# AutoBoardSchema removed - auto-boards are now managed automatically by the scheduler
+
+class RecommendationSchema(BaseModel):
+    pin_id: str
+    score: float
+    reason: str
+
+class UserBoardsSchema(BaseModel):
+    user_id: str
+    boards: List[BoardSchema]
+    count: int
 
 class TopicSchema(BaseModel):
     topic_id: str
