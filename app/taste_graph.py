@@ -5,7 +5,7 @@ from typing import Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
 import json
 
-from app.db import Board, PinTopic, Topic, User
+from app.db import Board, PinTopic, Topic, User, Interaction
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +23,18 @@ class TasteGraphManager:
         self.topic_cache = {}
         self.user_cache = {}
         
+        # Initialize auto-board creator and correlation engine
+        from .auto_board_creator import AutoBoardCreator, BoardVectorManager
+        from .correlation_engine import CorrelationEngine
+        
+        self.auto_board_creator = AutoBoardCreator(session, vectorizer, index_adapter)
+        self.board_vector_manager = BoardVectorManager(session, vectorizer, index_adapter)
+        self.correlation_engine = CorrelationEngine(session, vectorizer, index_adapter)
+        
     def initialize_user(self, user_id: str) -> Dict:
         """
         Initialize a new user in the taste graph system.
-        Creates user record and initializes taste vector.
+        Creates user record, initializes taste vector, and creates initial auto-boards.
         """
         logger.info(f"Initializing user {user_id}")
         
@@ -46,11 +54,104 @@ class TasteGraphManager:
             'interaction_count': 0
         }
         
+        # Automatically create initial auto-boards after user has some interactions
+        # This will be triggered by the periodic background task
+        logger.info(f"User {user_id} initialized - auto-boards will be created after sufficient interactions")
+        
         return {
             'user_id': user_id,
             'taste_vector_version': 1,
             'status': 'initialized'
         }
+    
+    def create_auto_boards_for_user(self, user_id: str) -> Dict:
+        """Create auto-generated boards for a user"""
+        try:
+            created_boards = self.auto_board_creator.create_auto_boards_for_user(user_id)
+            return {
+                'user_id': user_id,
+                'created_boards': created_boards,
+                'count': len(created_boards),
+                'status': 'success'
+            }
+        except Exception as e:
+            logger.error(f"Failed to create auto-boards for user {user_id}: {e}")
+            return {
+                'user_id': user_id,
+                'created_boards': [],
+                'count': 0,
+                'status': 'error',
+                'error': str(e)
+            }
+    
+    def update_auto_boards_for_user(self, user_id: str) -> Dict:
+        """Update existing auto-boards for a user"""
+        try:
+            updated_boards = self.auto_board_creator.update_auto_boards(user_id)
+            return {
+                'user_id': user_id,
+                'updated_boards': updated_boards,
+                'count': len(updated_boards),
+                'status': 'success'
+            }
+        except Exception as e:
+            logger.error(f"Failed to update auto-boards for user {user_id}: {e}")
+            return {
+                'user_id': user_id,
+                'updated_boards': [],
+                'count': 0,
+                'status': 'error',
+                'error': str(e)
+            }
+    
+    def update_board_vectors(self) -> Dict:
+        """Update vectors for all boards"""
+        try:
+            self.board_vector_manager.update_all_board_vectors()
+            return {
+                'status': 'success',
+                'message': 'Board vectors updated successfully'
+            }
+        except Exception as e:
+            logger.error(f"Failed to update board vectors: {e}")
+            return {
+                'status': 'error',
+                'error': str(e)
+            }
+    
+    def compute_correlations_for_user(self, user_id: str) -> Dict:
+        """Compute correlations for a user"""
+        try:
+            user_correlations = self.correlation_engine.compute_user_correlations(user_id)
+            return {
+                'user_id': user_id,
+                'correlations_count': len(user_correlations),
+                'status': 'success'
+            }
+        except Exception as e:
+            logger.error(f"Failed to compute correlations for user {user_id}: {e}")
+            return {
+                'user_id': user_id,
+                'correlations_count': 0,
+                'status': 'error',
+                'error': str(e)
+            }
+    
+    def get_recommendations_for_user(self, user_id: str, top_k: int = 20) -> List[Dict]:
+        """Get personalized recommendations for a user"""
+        try:
+            recommendations = self.correlation_engine.get_recommendations_for_user(user_id, top_k)
+            return [
+                {
+                    'pin_id': pin_id,
+                    'score': score,
+                    'reason': reason
+                }
+                for pin_id, score, reason in recommendations
+            ]
+        except Exception as e:
+            logger.error(f"Failed to get recommendations for user {user_id}: {e}")
+            return []
     
     def process_user_interaction(self, user_id: str, image_id: str, 
                                event: str, weight: float = 1.0) -> Dict:
@@ -76,6 +177,16 @@ class TasteGraphManager:
         # Extract and update topics
         self._update_image_topics(image_id)
         self._update_user_topic_affinities(user_id, image_id, event, weight)
+        
+        # Trigger auto-board updates (in background) - this will be handled by the scheduler
+        # The scheduler will automatically detect when users need auto-board updates
+        
+        # Update correlations (in background)
+        try:
+            self.correlation_engine.compute_user_correlations(user_id, max_users=20)
+            self.correlation_engine.compute_pin_correlations(image_id, max_pins=50)
+        except Exception as e:
+            logger.warning(f"Correlation update failed: {e}")
         
         return {
             'user_id': user_id,
@@ -199,7 +310,7 @@ class TasteGraphManager:
     def get_personalized_search_results(self, user_id: str, search_results: List[Dict], 
                                       top_k: int = 10) -> List[Dict]:
         """
-        Rerank search results using user's taste vector and topic affinities.
+        Rerank search results using user's taste vector, board vectors, and enhanced correlations.
         """
         if not user_id:
             return search_results[:top_k]
@@ -209,8 +320,19 @@ class TasteGraphManager:
         if user_taste is None:
             return search_results[:top_k]
         
+        # Get user's boards and their vectors
+        user_boards = self.session.get_user_boards(user_id, active_only=True)
+        board_vectors = {}
+        for board in user_boards:
+            if board.board_vector:
+                board_vectors[board.board_id] = np.array(board.board_vector)
+        
         # Get user's top topics
         user_topics = dict(self.session.get_user_topics(user_id, 20))
+        
+        # Get similar users for collaborative filtering
+        similar_users = self.session.get_similar_users(user_id, top_k=10)
+        similar_user_ids = [user_id for user_id, _, _ in similar_users]
         
         # Rerank results
         reranked_results = []
@@ -222,17 +344,34 @@ class TasteGraphManager:
             # Calculate taste similarity bonus
             taste_bonus = self._calculate_taste_similarity_bonus(user_taste, image_id)
             
+            # Calculate board similarity bonus
+            board_bonus = self._calculate_board_similarity_bonus(board_vectors, image_id)
+            
             # Calculate topic affinity bonus
             topic_bonus = self._calculate_topic_affinity_bonus(user_topics, image_id)
             
-            # Combine scores
-            personalized_score = base_score + taste_bonus + topic_bonus
+            # Calculate collaborative filtering bonus
+            collaborative_bonus = self._calculate_collaborative_bonus(similar_user_ids, image_id)
+            
+            # Calculate behavioral correlation bonus
+            behavioral_bonus = self._calculate_behavioral_bonus(user_id, image_id)
+            
+            # Combine scores with weights
+            personalized_score = (base_score + 
+                                taste_bonus * 0.3 + 
+                                board_bonus * 0.25 + 
+                                topic_bonus * 0.2 + 
+                                collaborative_bonus * 0.15 + 
+                                behavioral_bonus * 0.1)
             
             reranked_results.append({
                 **result,
                 'score': personalized_score,
                 'taste_bonus': taste_bonus,
-                'topic_bonus': topic_bonus
+                'board_bonus': board_bonus,
+                'topic_bonus': topic_bonus,
+                'collaborative_bonus': collaborative_bonus,
+                'behavioral_bonus': behavioral_bonus
             })
         
         # Sort by personalized score
@@ -264,6 +403,91 @@ class TasteGraphManager:
         bonus = max(0, similarity * 0.3)
         
         return bonus
+    
+    def _calculate_board_similarity_bonus(self, board_vectors: Dict[str, np.ndarray], image_id: str) -> float:
+        """
+        Calculate bonus score based on board vector similarity.
+        """
+        if not board_vectors:
+            return 0.0
+        
+        # Get exact image vector from index if available
+        image_vector = None
+        if self.index_adapter:
+            try:
+                image_vector = self.vectorizer.get_vector(image_id, self.index_adapter)
+            except Exception as e:
+                logger.warning(f"Failed to get vector for image {image_id}: {e}")
+        
+        if image_vector is None:
+            return 0.0
+        
+        # Calculate similarity with each board
+        max_similarity = 0.0
+        for board_id, board_vector in board_vectors.items():
+            similarity = np.dot(image_vector, board_vector)
+            max_similarity = max(max_similarity, similarity)
+        
+        # Convert to bonus score (0 to 0.4 range)
+        bonus = max(0, max_similarity * 0.4)
+        return bonus
+    
+    def _calculate_collaborative_bonus(self, similar_user_ids: List[str], image_id: str) -> float:
+        """
+        Calculate bonus score based on similar users' preferences.
+        """
+        if not similar_user_ids:
+            return 0.0
+        
+        # Check if any similar users interacted with this image
+        interactions = self.session.session.query(Interaction).filter(
+            Interaction.image_id == image_id,
+            Interaction.user_id.in_(similar_user_ids)
+        ).all()
+        
+        if not interactions:
+            return 0.0
+        
+        # Calculate weighted score based on interaction types
+        total_score = 0.0
+        for interaction in interactions:
+            weight = self._get_interaction_weight(interaction.event, interaction.weight)
+            total_score += weight
+        
+        # Normalize and convert to bonus
+        bonus = min(0.3, total_score / len(similar_user_ids) * 0.3)
+        return bonus
+    
+    def _calculate_behavioral_bonus(self, user_id: str, image_id: str) -> float:
+        """
+        Calculate bonus score based on behavioral correlations.
+        """
+        # Get similar pins to this one
+        similar_pins = self.session.get_similar_pins(image_id, top_k=20)
+        
+        # Check if user interacted with any similar pins
+        user_interactions = self.session.get_user_interaction_history(user_id, limit=1000)
+        user_pin_ids = set(interaction.image_id for interaction in user_interactions)
+        
+        behavioral_score = 0.0
+        for similar_pin_id, similarity, cooccurrence, behavioral in similar_pins:
+            if similar_pin_id in user_pin_ids:
+                # User interacted with similar content
+                behavioral_score += behavioral * 0.5 + similarity * 0.3 + cooccurrence * 0.2
+        
+        # Convert to bonus score
+        bonus = min(0.2, behavioral_score * 0.2)
+        return bonus
+    
+    def _get_interaction_weight(self, event: str, base_weight: float) -> float:
+        """Convert interaction event to weight"""
+        event_weights = {
+            'save': 2.0,
+            'like': 1.5,
+            'click': 1.0,
+            'view': 0.5
+        }
+        return event_weights.get(event, 1.0) * base_weight
     
     def _calculate_topic_affinity_bonus(self, user_topics: Dict[str, float], image_id: str) -> float:
         """

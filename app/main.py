@@ -10,12 +10,13 @@ from starlette.responses import Response
 from .vectorizer import Vectorizer
 from .index_adapter import IndexAdapter
 from .db import get_session, init_db, ImageMetadata, Interaction
-from .schemas import SearchResultSchema, UserTasteProfile, BoardSchema, PinBoardSchema, TasteGraphStatus
+from .schemas import SearchResultSchema, UserTasteProfile, BoardSchema, PinBoardSchema, TasteGraphStatus, RecommendationSchema, UserBoardsSchema
 from .storage import save_image
 from .tasks import full_reindex, ingest_local_images, ingest_online_images, rebuild_taste_graph
 from .db import ImageMetadata
 from .metadata import extract_image_metadata, detect_filters_from_text
 from .taste_graph import initialize_taste_graph_system, get_taste_graph_manager
+from .auto_board_scheduler import initialize_auto_board_scheduler
 import tempfile
 import uuid
 from dotenv import load_dotenv
@@ -59,6 +60,11 @@ taste_graph_manager = None
 try:
     taste_graph_manager = initialize_taste_graph_system(get_session(), vectorizer, index)
     logger.info("Taste graph system initialized successfully")
+    
+    # Initialize auto-board scheduler
+    initialize_auto_board_scheduler(taste_graph_manager, check_interval_minutes=30)
+    logger.info("Auto-board scheduler initialized successfully")
+    
 except Exception as e:
     logger.warning(f"Failed to initialize taste graph system: {e}")
     taste_graph_manager = None
@@ -75,6 +81,79 @@ async def on_startup():
 async def root():
     return {"message": "Image Search Backend running"}
 
+async def get_taste_based_recommendations(user_id: str, top_k: int) -> SearchResultSchema:
+    """
+    Get taste-based recommendations for a user when no search query is provided.
+    Uses the user's taste graph to find personalized image recommendations.
+    """
+    try:
+        # Initialize user if not exists
+        if taste_graph_manager:
+            taste_graph_manager.initialize_user(user_id)
+        
+        # Get all images from the index
+        session = get_session()
+        all_images = session.get_all_images()
+        
+        if not all_images:
+            return SearchResultSchema(
+                results=[],
+                total=0,
+                query="taste-based recommendations",
+                user_id=user_id,
+                personalized=True
+            )
+        
+        # Convert to search results format
+        search_results = []
+        for img in all_images:
+            search_results.append({
+                'id': img.id,
+                'score': 0.5,  # Base score for taste recommendations
+                'image_url': img.image_url,
+                'url': img.image_url,  # Alternative field for compatibility
+                'metadata': img.image_metadata or {}
+            })
+        
+        # Apply taste-based personalization if taste graph is available
+        if taste_graph_manager:
+            try:
+                personalized_results = taste_graph_manager.get_personalized_search_results(
+                    user_id, search_results, top_k=top_k
+                )
+                search_results = personalized_results
+            except Exception as e:
+                logger.warning(f"Failed to personalize taste recommendations for user {user_id}: {e}")
+                # Fall back to random selection if personalization fails
+                import random
+                search_results = random.sample(search_results, min(top_k, len(search_results)))
+        else:
+            # If no taste graph, return random selection
+            import random
+            search_results = random.sample(search_results, min(top_k, len(search_results)))
+        
+        # Limit to requested top_k
+        search_results = search_results[:top_k]
+        
+        return SearchResultSchema(
+            results=search_results,
+            total=len(search_results),
+            query="taste-based recommendations",
+            user_id=user_id,
+            personalized=True
+        )
+        
+    except Exception as e:
+        logger.exception(f"Failed to get taste-based recommendations for user {user_id}")
+        # Return empty results on error
+        return SearchResultSchema(
+            results=[],
+            total=0,
+            query="taste-based recommendations",
+            user_id=user_id,
+            personalized=False,
+            error=str(e)
+        )
 
 @app.post("/search", response_model=SearchResultSchema)
 async def search(
@@ -88,16 +167,24 @@ async def search(
     - If only text is provided: searches using text vector
     - If only image is provided: searches using image vector
     - If both are provided: combines both vectors using weighted average
-    - At least one input (text or image) is required
+    - If no input is provided but user_id is given: returns taste-based recommendations
     - Enhanced metadata filtering and ranking based on all available metadata
     """
-    # Validate that at least one input is provided
+    # Handle empty query case - return taste-based recommendations if user_id is provided
     if not query and not file:
-        raise HTTPException(status_code=400, detail="At least one input (query or file) is required")
+        if user_id:
+            # Return taste-based recommendations for the user
+            return await get_taste_based_recommendations(user_id, top_k)
+        else:
+            raise HTTPException(status_code=400, detail="At least one input (query, file, or user_id) is required")
     
     # Validate text input
     if query and not query.strip():
-        raise HTTPException(status_code=400, detail="Query text cannot be empty")
+        if user_id:
+            # Empty query with user_id - return taste-based recommendations
+            return await get_taste_based_recommendations(user_id, top_k)
+        else:
+            raise HTTPException(status_code=400, detail="Query text cannot be empty")
     
     # Validate image content type if provided
     if file and file.content_type not in ("image/jpeg", "image/jpg", "image/png", "image/webp"):
@@ -368,6 +455,7 @@ async def search(
             "id": r["id"],
             "content_type": meta.content_type,
             "image_url": meta.image_url,
+            "url": meta.image_url,  # Add url field for schema compatibility
             "score": score
         })
 
@@ -380,12 +468,24 @@ async def search(
             personalized_results = taste_graph_manager.get_personalized_search_results(
                 user_id, filtered, top_k
             )
-            return {"results": personalized_results}
+            return SearchResultSchema(
+                results=personalized_results,
+                total=len(personalized_results),
+                query=query or "image search",
+                user_id=user_id,
+                personalized=True
+            )
         except Exception as e:
             logger.warning(f"Taste graph personalization failed: {e}")
             # Fall back to regular results
     
-    return {"results": filtered[:top_k]}
+    return SearchResultSchema(
+        results=filtered[:top_k],
+        total=len(filtered[:top_k]),
+        query=query or "image search",
+        user_id=user_id,
+        personalized=False
+    )
 
 
 @app.post("/admin/index")
@@ -563,6 +663,119 @@ async def rebuild_taste_graph_endpoint(background_tasks: BackgroundTasks):
     background_tasks.add_task(rebuild_taste_graph_task)
     logger.info("Taste graph rebuild started...")
     return {"status": "rebuild started"}
+
+# Enhanced Board Management Endpoints
+
+@app.get("/taste-graph/users/{user_id}/boards")
+async def get_user_boards(user_id: str, board_type: str = None):
+    """Get user's boards (user-created and auto-generated)"""
+    if not taste_graph_manager:
+        raise HTTPException(status_code=503, detail="Taste graph system not available")
+    
+    try:
+        session = get_session()
+        boards = session.get_user_boards(user_id, board_type=board_type)
+        
+        board_data = []
+        for board in boards:
+            board_data.append({
+                'board_id': board.board_id,
+                'name': board.name,
+                'description': board.description,
+                'board_type': board.board_type,
+                'pin_count': board.pin_count,
+                'created_at': board.created_at,
+                'last_activity': board.last_activity
+            })
+        
+        return {
+            'user_id': user_id,
+            'boards': board_data,
+            'count': len(board_data)
+        }
+    except Exception as e:
+        logger.exception("Failed to get user boards")
+        raise HTTPException(status_code=500, detail="Failed to get user boards")
+
+@app.post("/taste-graph/admin/update-board-vectors")
+async def update_board_vectors():
+    """Update vectors for all boards"""
+    if not taste_graph_manager:
+        raise HTTPException(status_code=503, detail="Taste graph system not available")
+    
+    try:
+        result = taste_graph_manager.update_board_vectors()
+        return result
+    except Exception as e:
+        logger.exception("Failed to update board vectors")
+        raise HTTPException(status_code=500, detail="Failed to update board vectors")
+
+@app.get("/taste-graph/admin/scheduler-status")
+async def get_scheduler_status():
+    """Get auto-board scheduler status"""
+    from .auto_board_scheduler import get_auto_board_scheduler
+    
+    scheduler = get_auto_board_scheduler()
+    if not scheduler:
+        return {"status": "not_initialized"}
+    
+    return scheduler.get_scheduler_status()
+
+@app.post("/admin/migrate-database")
+async def migrate_database():
+    """Force database migration to add new columns and tables"""
+    from .db import force_migration
+    
+    try:
+        success = force_migration()
+        if success:
+            return {"status": "success", "message": "Database migration completed"}
+        else:
+            return {"status": "error", "message": "Database migration failed"}
+    except Exception as e:
+        logger.exception("Database migration failed")
+        return {"status": "error", "message": f"Migration failed: {str(e)}"}
+
+@app.post("/taste-graph/users/{user_id}/correlations")
+async def compute_user_correlations(user_id: str):
+    """Compute correlations for a user"""
+    if not taste_graph_manager:
+        raise HTTPException(status_code=503, detail="Taste graph system not available")
+    
+    try:
+        result = taste_graph_manager.compute_correlations_for_user(user_id)
+        return result
+    except Exception as e:
+        logger.exception("Failed to compute correlations")
+        raise HTTPException(status_code=500, detail="Failed to compute correlations")
+
+@app.get("/taste-graph/users/{user_id}/recommendations")
+async def get_user_recommendations(user_id: str, top_k: int = 20):
+    """Get personalized recommendations for a user"""
+    if not taste_graph_manager:
+        raise HTTPException(status_code=503, detail="Taste graph system not available")
+    
+    try:
+        recommendations = taste_graph_manager.get_recommendations_for_user(user_id, top_k)
+        return {
+            'user_id': user_id,
+            'recommendations': recommendations,
+            'count': len(recommendations)
+        }
+    except Exception as e:
+        logger.exception("Failed to get recommendations")
+        raise HTTPException(status_code=500, detail="Failed to get recommendations")
+
+@app.get("/recommendations", response_model=SearchResultSchema)
+async def get_taste_recommendations(
+    user_id: str = Query(..., description="User id to get personalized recommendations"),
+    top_k: int = Query(10, ge=1, le=100, description="Number of recommendations to return")
+):
+    """
+    Get taste-based image recommendations for a user.
+    This endpoint provides personalized image recommendations based on the user's taste graph.
+    """
+    return await get_taste_based_recommendations(user_id, top_k)
 
 @app.post("/events")
 async def record_event(
