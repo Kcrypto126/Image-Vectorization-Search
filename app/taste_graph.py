@@ -104,20 +104,7 @@ class TasteGraphManager:
                 'error': str(e)
             }
     
-    def update_board_vectors(self) -> Dict:
-        """Update vectors for all boards"""
-        try:
-            self.board_vector_manager.update_all_board_vectors()
-            return {
-                'status': 'success',
-                'message': 'Board vectors updated successfully'
-            }
-        except Exception as e:
-            logger.error(f"Failed to update board vectors: {e}")
-            return {
-                'status': 'error',
-                'error': str(e)
-            }
+    # Manual board vector update method removed - vectors are now updated automatically
     
     def compute_correlations_for_user(self, user_id: str) -> Dict:
         """Compute correlations for a user"""
@@ -512,9 +499,9 @@ class TasteGraphManager:
     
     def create_board(self, user_id: str, board_id: str, name: str, description: str = None) -> Dict:
         """
-        Create a new board for a user.
+        Create a new board for a user with automatic vector initialization.
         """
-        board = self.session.create_board(board_id, user_id, name, description)
+        board = self.session.create_board(board_id, user_id, name, description, board_type='user')
         
         return {
             'board_id': board.board_id,
@@ -524,17 +511,44 @@ class TasteGraphManager:
             'status': 'created'
         }
     
-    def add_pin_to_board(self, pin_id: str, board_id: str) -> Dict:
+    def add_pin_to_board(self, pin_id: str, board_id: str, user_id: str = None) -> Dict:
         """
-        Add a pin to a board.
+        Add a pin to a board with automatic vector and metadata updates.
         """
-        pin_board = self.session.add_pin_to_board(pin_id, board_id)
+        # Enforce that only the owner can add pins if user_id provided
+        pin_board = self.session.add_pin_to_board(
+            pin_id, board_id, owner_user_id=user_id, 
+            vectorizer=self.vectorizer, index_adapter=self.index_adapter
+        )
         
         return {
             'pin_id': pin_id,
             'board_id': board_id,
             'status': 'added'
         }
+    
+    def remove_pin_from_board(self, pin_id: str, board_id: str, user_id: str = None) -> Dict:
+        """
+        Remove a pin from a board with automatic vector and metadata updates.
+        """
+        # Enforce that only the owner can remove pins if user_id provided
+        pin_board = self.session.remove_pin_from_board(
+            pin_id, board_id, owner_user_id=user_id,
+            vectorizer=self.vectorizer, index_adapter=self.index_adapter
+        )
+        
+        if pin_board:
+            return {
+                'pin_id': pin_id,
+                'board_id': board_id,
+                'status': 'removed'
+            }
+        else:
+            return {
+                'pin_id': pin_id,
+                'board_id': board_id,
+                'status': 'not_found'
+            }
     
     def get_user_taste_profile(self, user_id: str) -> Dict:
         """

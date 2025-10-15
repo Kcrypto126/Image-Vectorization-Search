@@ -624,17 +624,34 @@ async def create_board(
         raise HTTPException(status_code=500, detail="Failed to create board")
 
 @app.post("/taste-graph/boards/{board_id}/pins/{pin_id}", response_model=PinBoardSchema)
-async def add_pin_to_board(board_id: str, pin_id: str):
-    """Add a pin to a board"""
+async def add_pin_to_board(board_id: str, pin_id: str, user_id: str = Query(..., description="User id performing the action")):
+    """Add a pin to a board. Only the board owner can add pins."""
     if not taste_graph_manager:
         raise HTTPException(status_code=503, detail="Taste graph system not available")
     
     try:
-        result = taste_graph_manager.add_pin_to_board(pin_id, board_id)
+        result = taste_graph_manager.add_pin_to_board(pin_id, board_id, user_id=user_id)
         return result
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
         logger.exception("Failed to add pin to board")
         raise HTTPException(status_code=500, detail="Failed to add pin to board")
+
+@app.delete("/taste-graph/boards/{board_id}/pins/{pin_id}", response_model=PinBoardSchema)
+async def remove_pin_from_board(board_id: str, pin_id: str, user_id: str = Query(..., description="User id performing the action")):
+    """Remove a pin from a board. Only the board owner can remove pins."""
+    if not taste_graph_manager:
+        raise HTTPException(status_code=503, detail="Taste graph system not available")
+    
+    try:
+        result = taste_graph_manager.remove_pin_from_board(pin_id, board_id, user_id=user_id)
+        return result
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        logger.exception("Failed to remove pin from board")
+        raise HTTPException(status_code=500, detail="Failed to remove pin from board")
 
 @app.post("/admin/taste-graph/train")
 async def train_taste_graph(
@@ -697,18 +714,7 @@ async def get_user_boards(user_id: str, board_type: str = None):
         logger.exception("Failed to get user boards")
         raise HTTPException(status_code=500, detail="Failed to get user boards")
 
-@app.post("/taste-graph/admin/update-board-vectors")
-async def update_board_vectors():
-    """Update vectors for all boards"""
-    if not taste_graph_manager:
-        raise HTTPException(status_code=503, detail="Taste graph system not available")
-    
-    try:
-        result = taste_graph_manager.update_board_vectors()
-        return result
-    except Exception as e:
-        logger.exception("Failed to update board vectors")
-        raise HTTPException(status_code=500, detail="Failed to update board vectors")
+# Manual board vector update API removed - vectors are now updated automatically
 
 @app.get("/taste-graph/admin/scheduler-status")
 async def get_scheduler_status():
