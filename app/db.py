@@ -1,6 +1,7 @@
 # app/db.py
 from sqlalchemy import create_engine, Column, String, DateTime, JSON, inspect, text, Integer, Float, Index, Text, Boolean
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 import os
 import uuid
@@ -406,17 +407,40 @@ class DBSession:
 
     def create_board(self, board_id: str, user_id: str, name: str = None, description: str = None, 
                     board_type: str = 'user', board_vector: np.ndarray = None):
-        """Create a new board"""
+        """Create a new board with automatic vector initialization"""
+        # If the board already exists, return it instead of failing
+        existing = self.session.query(Board).filter(Board.board_id == board_id).first()
+        if existing:
+            return existing
+        
+        # Initialize board vector based on type
+        if board_vector is not None:
+            # Use provided vector (for auto-boards)
+            initial_vector = board_vector.tolist()
+        elif board_type == 'user':
+            # Initialize user boards with zero vector
+            initial_vector = [0.0] * 512  # Assuming 512-dimensional vectors
+        else:
+            # Auto boards should always have a proper vector
+            initial_vector = None
+        
         board = Board(
             board_id=board_id, 
             user_id=user_id, 
             name=name, 
             description=description,
             board_type=board_type,
-            board_vector=board_vector.tolist() if board_vector is not None else None
+            board_vector=initial_vector,
+            pin_count=0,
+            last_activity=datetime.utcnow()
         )
-        self.session.add(board)
-        self.session.commit()
+        try:
+            self.session.add(board)
+            self.session.commit()
+        except IntegrityError:
+            # Rollback the failed transaction and return the existing board
+            self.session.rollback()
+            board = self.session.query(Board).filter(Board.board_id == board_id).first()
         return board
     
     def create_auto_board(self, user_id: str, name: str, description: str, 
@@ -467,17 +491,106 @@ class DBSession:
             return np.array(board.board_vector)
         return None
 
-    def add_pin_to_board(self, pin_id: str, board_id: str):
-        """Add a pin to a board"""
+    def add_pin_to_board(self, pin_id: str, board_id: str, owner_user_id: str = None, 
+                        vectorizer=None, index_adapter=None):
+        """Add a pin to a board and update board vector/metadata automatically."""
+        # Ownership check if requested
+        if owner_user_id is not None:
+            board = self.session.query(Board).filter(Board.board_id == board_id).first()
+            if not board or board.user_id != owner_user_id:
+                raise PermissionError("User does not own this board")
+        
         # Check if association already exists
         existing = self.session.query(PinBoard).filter(
             PinBoard.pin_id == pin_id, PinBoard.board_id == board_id
         ).first()
+        
         if not existing:
             pin_board = PinBoard(pin_id=pin_id, board_id=board_id)
-            self.session.add(pin_board)
-            self.session.commit()
+            try:
+                self.session.add(pin_board)
+                self.session.commit()
+                
+                # Update board metadata and vector after successful pin addition
+                self._update_board_metadata_and_vector(board_id, vectorizer, index_adapter)
+                
+            except IntegrityError:
+                self.session.rollback()
+                existing = self.session.query(PinBoard).filter(
+                    PinBoard.pin_id == pin_id, PinBoard.board_id == board_id
+                ).first()
+        else:
+            # Pin already exists, still update metadata (in case of external changes)
+            self._update_board_metadata_and_vector(board_id, vectorizer, index_adapter)
+            
         return existing or pin_board
+
+    def remove_pin_from_board(self, pin_id: str, board_id: str, owner_user_id: str = None,
+                             vectorizer=None, index_adapter=None):
+        """Remove a pin from a board and update board vector/metadata automatically."""
+        # Ownership check if requested
+        if owner_user_id is not None:
+            board = self.session.query(Board).filter(Board.board_id == board_id).first()
+            if not board or board.user_id != owner_user_id:
+                raise PermissionError("User does not own this board")
+        
+        # Remove the association
+        pin_board = self.session.query(PinBoard).filter(
+            PinBoard.pin_id == pin_id, PinBoard.board_id == board_id
+        ).first()
+        
+        if pin_board:
+            self.session.delete(pin_board)
+            self.session.commit()
+            
+            # Update board metadata and vector after successful pin removal
+            self._update_board_metadata_and_vector(board_id, vectorizer, index_adapter)
+            
+        return pin_board
+
+    def _update_board_metadata_and_vector(self, board_id: str, vectorizer=None, index_adapter=None):
+        """Update board metadata (pin_count, last_activity) and vector based on pins"""
+        try:
+            # Get board
+            board = self.session.query(Board).filter(Board.board_id == board_id).first()
+            if not board:
+                return
+            
+            # Update metadata
+            pin_count = self.session.query(PinBoard).filter(PinBoard.board_id == board_id).count()
+            board.pin_count = pin_count
+            board.last_activity = datetime.utcnow()
+            
+            # Update vector based on board type
+            if board.board_type == 'user' and pin_count > 0 and vectorizer and index_adapter:
+                # For user boards, compute vector from all pins
+                pin_ids = [pb.pin_id for pb in self.session.query(PinBoard).filter(PinBoard.board_id == board_id).all()]
+                if pin_ids:
+                    vectors = []
+                    for pin_id in pin_ids:
+                        try:
+                            vector = vectorizer.get_vector(pin_id, index_adapter)
+                            if vector is not None:
+                                vectors.append(vector)
+                        except Exception as e:
+                            logger.warning(f"Failed to get vector for pin {pin_id}: {e}")
+                    
+                    if vectors:
+                        # Compute average vector
+                        board_vector = np.mean(vectors, axis=0)
+                        board.board_vector = board_vector.tolist()
+                    else:
+                        # Fallback to zero vector if no vectors found
+                        board.board_vector = [0.0] * 512
+                else:
+                    # No pins, keep zero vector
+                    board.board_vector = [0.0] * 512
+            
+            self.session.commit()
+            
+        except Exception as e:
+            logger.warning(f"Failed to update board metadata/vector for {board_id}: {e}")
+            self.session.rollback()
 
     def create_topic(self, topic_id: str, name: str, description: str = None, topic_vector: np.ndarray = None):
         """Create a new topic"""
