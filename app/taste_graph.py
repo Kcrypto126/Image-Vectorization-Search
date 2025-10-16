@@ -264,6 +264,11 @@ class TasteGraphManager:
             name=topic_name.title(),
             description=f"Topic: {topic_name}"
         )
+        # Generate initial topic_vector automatically
+        try:
+            self.session.ensure_topic_vector(topic.topic_id, self.vectorizer, self.index_adapter)
+        except Exception as e:
+            logger.warning(f"Failed to initialize topic vector for {topic_name}: {e}")
         
         self.topic_cache[topic_name] = topic.topic_id
         return topic.topic_id

@@ -617,7 +617,7 @@ class DBSession:
         self.session.commit()
         return existing or pin_topic
 
-    def update_user_topic_affinity(self, user_id: str, topic_id: str, affinity_delta: float, interaction_type: str = None):
+    def update_user_topic_affinity(self, user_id: str, topic_id: str, affinity_delta: float, interaction_type: str = None, vectorizer=None, index_adapter=None):
         """Update user's affinity to a topic based on interaction"""
         user_topic = self.session.query(UserTopic).filter(
             UserTopic.user_id == user_id, UserTopic.topic_id == topic_id
@@ -632,7 +632,49 @@ class DBSession:
         user_topic.last_interaction = datetime.utcnow()
         user_topic.updated_at = datetime.utcnow()
         self.session.commit()
+
+        # Ensure topic vector exists/updated when user-topic is created/updated
+        try:
+            if vectorizer is not None:
+                # Update topic vector opportunistically every 10 interactions or on first creation
+                if user_topic.interaction_count == 1 or (user_topic.interaction_count % 10 == 0):
+                    self.ensure_topic_vector(topic_id, vectorizer, index_adapter)
+        except Exception as e:
+            logger.warning(f"Failed to ensure topic vector for {topic_id}: {e}")
         return user_topic
+
+    def ensure_topic_vector(self, topic_id: str, vectorizer, index_adapter=None):
+        """Ensure Topic.topic_vector is generated/updated from associated pins or topic name."""
+        topic = self.session.query(Topic).filter(Topic.topic_id == topic_id).first()
+        if not topic:
+            return None
+        try:
+            # Try to aggregate vectors from associated pins
+            pin_topics = self.session.query(PinTopic).filter(PinTopic.topic_id == topic_id).all()
+            vectors = []
+            if pin_topics and index_adapter is not None:
+                for pt in pin_topics:
+                    try:
+                        vec = vectorizer.get_vector(pt.pin_id, index_adapter)
+                        if vec is not None:
+                            vectors.append(vec)
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch vector for pin {pt.pin_id}: {e}")
+            if vectors:
+                topic_vec = np.mean(vectors, axis=0)
+            else:
+                # Fallback to text encoding of topic name
+                topic_vec = vectorizer.text_to_vector(topic.name)[0]
+            # Normalize and persist
+            topic_vec = topic_vec / (np.linalg.norm(topic_vec) + 1e-8)
+            topic.topic_vector = topic_vec.tolist()
+            topic.updated_at = datetime.utcnow()
+            self.session.commit()
+            return topic_vec
+        except Exception as e:
+            logger.warning(f"ensure_topic_vector failed for {topic_id}: {e}")
+            self.session.rollback()
+            return None
 
     def add_taste_graph_edge(self, source_type: str, source_id: str, target_type: str, target_id: str, 
                            edge_type: str, weight: float = 1.0, metadata: dict = None):
