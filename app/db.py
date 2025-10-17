@@ -726,6 +726,15 @@ class DBSession:
     def update_user_correlation(self, user_a: str, user_b: str, similarity_score: float, 
                                interaction_overlap: float = 0.0):
         """Update correlation between two users"""
+        # Ensure native Python floats (avoid numpy types reaching the DB driver)
+        try:
+            similarity_score = float(similarity_score)
+        except Exception:
+            pass
+        try:
+            interaction_overlap = float(interaction_overlap)
+        except Exception:
+            pass
         correlation = self.session.query(UserCorrelation).filter(
             ((UserCorrelation.user_a == user_a) & (UserCorrelation.user_b == user_b)) |
             ((UserCorrelation.user_a == user_b) & (UserCorrelation.user_b == user_a))
@@ -761,6 +770,19 @@ class DBSession:
     def update_pin_correlation(self, pin_a: str, pin_b: str, similarity_score: float,
                               cooccurrence_score: float = 0.0, behavioral_score: float = 0.0):
         """Update correlation between two pins"""
+        # Ensure native Python floats
+        try:
+            similarity_score = float(similarity_score)
+        except Exception:
+            pass
+        try:
+            cooccurrence_score = float(cooccurrence_score)
+        except Exception:
+            pass
+        try:
+            behavioral_score = float(behavioral_score)
+        except Exception:
+            pass
         correlation = self.session.query(PinCorrelation).filter(
             ((PinCorrelation.pin_a == pin_a) & (PinCorrelation.pin_b == pin_b)) |
             ((PinCorrelation.pin_a == pin_b) & (PinCorrelation.pin_b == pin_a))

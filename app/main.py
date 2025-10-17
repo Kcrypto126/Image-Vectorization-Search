@@ -63,10 +63,12 @@ try:
     
     # Initialize auto-board scheduler
     initialize_auto_board_scheduler(taste_graph_manager, check_interval_minutes=30)
+    logger.info("Auto-board scheduler initialized successfully")
+
     # Start correlation scheduler to periodically refresh user correlations
     from .correlation_scheduler import initialize_correlation_scheduler
     initialize_correlation_scheduler(taste_graph_manager, interval_minutes=60)
-    logger.info("Auto-board scheduler initialized successfully")
+    logger.info("Correlation scheduler initialized successfully")
     
 except Exception as e:
     logger.warning(f"Failed to initialize taste graph system: {e}")
