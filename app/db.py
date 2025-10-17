@@ -389,7 +389,7 @@ class DBSession:
     def update_user_taste_vector(self, user_id: str, taste_vector: np.ndarray, version: int = None):
         """Update user's taste vector"""
         user = self.get_or_create_user(user_id)
-        user.taste_vector = taste_vector.tolist()
+        user.taste_vector = taste_vector.astype(np.float64).tolist()
         if version:
             user.taste_vector_version = version
         else:
@@ -416,7 +416,7 @@ class DBSession:
         # Initialize board vector based on type
         if board_vector is not None:
             # Use provided vector (for auto-boards)
-            initial_vector = board_vector.tolist()
+            initial_vector = board_vector.astype(np.float64).tolist()
         elif board_type == 'user':
             # Initialize user boards with zero vector
             initial_vector = [0.0] * 512  # Assuming 512-dimensional vectors
@@ -454,8 +454,8 @@ class DBSession:
             name=name,
             description=description,
             board_type='auto',
-            board_vector=board_vector.tolist(),
-            cluster_center=cluster_center.tolist(),
+            board_vector=board_vector.astype(np.float64).tolist(),
+            cluster_center=cluster_center.astype(np.float64).tolist(),
             cluster_radius=cluster_radius
         )
         self.session.add(board)
@@ -466,7 +466,7 @@ class DBSession:
         """Update board's vector representation"""
         board = self.session.query(Board).filter(Board.board_id == board_id).first()
         if board:
-            board.board_vector = board_vector.tolist()
+            board.board_vector = board_vector.astype(np.float64).tolist()
             board.last_activity = datetime.utcnow()
             self.session.commit()
         return board
@@ -578,7 +578,7 @@ class DBSession:
                     if vectors:
                         # Compute average vector
                         board_vector = np.mean(vectors, axis=0)
-                        board.board_vector = board_vector.tolist()
+                        board.board_vector = board_vector.astype(np.float64).tolist()
                     else:
                         # Fallback to zero vector if no vectors found
                         board.board_vector = [0.0] * 512
@@ -598,7 +598,7 @@ class DBSession:
             topic_id=topic_id, 
             name=name, 
             description=description,
-            topic_vector=topic_vector.tolist() if topic_vector is not None else None
+            topic_vector=topic_vector.astype(np.float64).tolist() if topic_vector is not None else None
         )
         self.session.add(topic)
         self.session.commit()
@@ -667,7 +667,7 @@ class DBSession:
                 topic_vec = vectorizer.text_to_vector(topic.name)[0]
             # Normalize and persist
             topic_vec = topic_vec / (np.linalg.norm(topic_vec) + 1e-8)
-            topic.topic_vector = topic_vec.tolist()
+            topic.topic_vector = topic_vec.astype(np.float64).tolist()
             topic.updated_at = datetime.utcnow()
             self.session.commit()
             return topic_vec
@@ -821,13 +821,43 @@ class DBSession:
                              previous_board_ids: list = None, new_board_ids: list = None,
                              reason: str = None, evolution_data: dict = None):
         """Track board evolution events"""
+        # Sanitize JSON-like payloads to ensure native Python types (no numpy scalars/arrays)
+        def _sanitize_json(value):
+            try:
+                import numpy as np  # Local import to avoid circulars
+            except Exception:
+                np = None
+
+            if isinstance(value, dict):
+                return {str(k): _sanitize_json(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [_sanitize_json(v) for v in value]
+            # numpy scalar types
+            if np is not None:
+                if isinstance(value, (np.floating, np.integer)):
+                    return value.item()
+                if isinstance(value, np.ndarray):
+                    # default to float64 list for numeric arrays
+                    try:
+                        return value.astype(float).tolist()
+                    except Exception:
+                        return value.tolist()
+            # Fallback for objects exposing item()
+            item = getattr(value, 'item', None)
+            if callable(item):
+                try:
+                    return value.item()
+                except Exception:
+                    pass
+            return value
+
         evolution = BoardEvolution(
             board_id=board_id,
             evolution_type=evolution_type,
-            previous_board_ids=previous_board_ids,
-            new_board_ids=new_board_ids,
+            previous_board_ids=_sanitize_json(previous_board_ids) if previous_board_ids is not None else None,
+            new_board_ids=_sanitize_json(new_board_ids) if new_board_ids is not None else None,
             reason=reason,
-            evolution_data=evolution_data
+            evolution_data=_sanitize_json(evolution_data) if evolution_data is not None else None
         )
         self.session.add(evolution)
         self.session.commit()
