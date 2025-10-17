@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import json
 
 from app.db import Board, PinTopic, Topic, User, Interaction
+from app.enhanced_auto_board_manager import EnhancedAutoBoardManager
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,16 @@ class TasteGraphManager:
         self.auto_board_creator = AutoBoardCreator(session, vectorizer, index_adapter)
         self.board_vector_manager = BoardVectorManager(session, vectorizer, index_adapter)
         self.correlation_engine = CorrelationEngine(session, vectorizer, index_adapter)
+        
+        # Initialize enhanced auto-board manager
+        self.enhanced_auto_board_manager = EnhancedAutoBoardManager(
+            session, vectorizer, index_adapter,
+            min_pins_for_new_board=15,
+            similarity_threshold=0.7,
+            merge_threshold=0.9,
+            decay_days=30,
+            duplicate_threshold=0.95
+        )
         
     def initialize_user(self, user_id: str) -> Dict:
         """
@@ -163,8 +174,11 @@ class TasteGraphManager:
         self._update_image_topics(image_id)
         self._update_user_topic_affinities(user_id, image_id, event, weight)
         
-        # Trigger auto-board updates (in background) - this will be handled by the scheduler
-        # The scheduler will automatically detect when users need auto-board updates
+        # Process enhanced auto-board logic
+        try:
+            self.enhanced_auto_board_manager.process_user_interaction(user_id, image_id, event, weight)
+        except Exception as e:
+            logger.warning(f"Enhanced auto-board processing failed: {e}")
         
         # Update correlations (in background)
         try:

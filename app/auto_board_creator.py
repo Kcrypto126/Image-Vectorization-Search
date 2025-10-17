@@ -166,7 +166,7 @@ class AutoBoardCreator:
             
             # Calculate cluster radius
             distances = [np.linalg.norm(vec - cluster_center) for vec in cluster_vectors]
-            cluster_radius = np.mean(distances)
+            cluster_radius = float(np.mean(distances))
             
             # Generate board name and description
             board_name, board_description = self._generate_board_metadata(pin_ids, cluster_center)
@@ -355,7 +355,7 @@ class AutoBoardCreator:
             if board:
                 new_cluster_center = np.mean(pin_vectors, axis=0)
                 distances = [np.linalg.norm(vec - new_cluster_center) for vec in pin_vectors]
-                new_cluster_radius = np.mean(distances)
+                new_cluster_radius = float(np.mean(distances))
                 
                 board.cluster_center = new_cluster_center.tolist()
                 board.cluster_radius = new_cluster_radius
