@@ -557,7 +557,8 @@ class RealTimeTasteUpdater:
         
         for pin_topic in pin_topics:
             self.session.update_user_topic_affinity(
-                user_id, pin_topic.topic_id, affinity_delta, event
+                user_id, pin_topic.topic_id, affinity_delta, event,
+                vectorizer=self.vectorizer, index_adapter=self.index_adapter
             )
 
 def initialize_taste_graph(session, vectorizer, index_adapter=None):

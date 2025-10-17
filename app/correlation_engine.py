@@ -8,6 +8,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 import itertools
 
 from app.db import Interaction, User, ImageMetadata, UserCorrelation, PinCorrelation, ItemCooccurrence
+from sqlalchemy import func
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +158,7 @@ class CorrelationEngine:
         result = self.session.session.query(Interaction.user_id).group_by(
             Interaction.user_id
         ).having(
-            self.session.session.func.count(Interaction.id) >= min_interactions
+            func.count(Interaction.id) >= min_interactions
         ).all()
         
         return [row[0] for row in result]

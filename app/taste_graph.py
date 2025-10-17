@@ -104,15 +104,13 @@ class TasteGraphManager:
                 'error': str(e)
             }
     
-    # Manual board vector update method removed - vectors are now updated automatically
-    
     def compute_correlations_for_user(self, user_id: str) -> Dict:
         """Compute correlations for a user"""
         try:
             user_correlations = self.correlation_engine.compute_user_correlations(user_id)
             return {
                 'user_id': user_id,
-                'correlations_count': len(user_correlations),
+                'correlations_users_count': len(user_correlations),
                 'status': 'success'
             }
         except Exception as e:
@@ -264,6 +262,11 @@ class TasteGraphManager:
             name=topic_name.title(),
             description=f"Topic: {topic_name}"
         )
+        # Generate initial topic_vector automatically
+        try:
+            self.session.ensure_topic_vector(topic.topic_id, self.vectorizer, self.index_adapter)
+        except Exception as e:
+            logger.warning(f"Failed to initialize topic vector for {topic_name}: {e}")
         
         self.topic_cache[topic_name] = topic.topic_id
         return topic.topic_id
