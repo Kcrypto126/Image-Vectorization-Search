@@ -91,6 +91,11 @@ class PinSageModel(nn.Module):
             PinSageLayer(dims[i], dims[i+1], num_samples) 
             for i in range(len(dims)-1)
         ])
+        # Projections to align neighbor features to the expected input dimension per layer
+        # This allows using raw neighbor features (initial dimension) across deeper layers
+        self.neighbor_projections = nn.ModuleList([
+            nn.Linear(dims[0], dims[i], bias=False) for i in range(len(dims)-1)
+        ])
         
         self.dropout = nn.Dropout(dropout)
         self.final_projection = nn.Linear(output_dim, output_dim)
@@ -102,8 +107,11 @@ class PinSageModel(nn.Module):
         """
         x = node_features
         
-        for layer in self.layers:
-            x = layer(x, neighbor_features, neighbor_weights)
+        for i, layer in enumerate(self.layers):
+            # Align neighbor features to the layer's expected input dimension
+            # neighbor_features: [batch, num_samples, input_dim0] -> [batch, num_samples, dims[i]]
+            neighbor_features_layer = self.neighbor_projections[i](neighbor_features)
+            x = layer(x, neighbor_features_layer, neighbor_weights)
             x = self.dropout(x)
         
         # Final projection

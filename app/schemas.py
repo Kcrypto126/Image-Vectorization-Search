@@ -5,9 +5,9 @@ from fastapi import UploadFile
 
 class ResultItem(BaseModel):
     id: str
-    content_type: Optional[str]
-    image_url: Optional[str]
-    url: Optional[str]  # Alternative field name for compatibility
+    content_type: Optional[str] = None
+    image_url: Optional[str] = None
+    url: Optional[str] = None  # Alternative field name for compatibility
     score: float
     taste_bonus: Optional[float] = None
     topic_bonus: Optional[float] = None
